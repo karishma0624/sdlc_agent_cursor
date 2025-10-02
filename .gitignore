@@ -1,0 +1,8 @@
+.streamlit/
+.venv/
+runs/
+.env
+backend/__pycache__/
+backend/services/__pycache__/
+
+systemprompt.txt

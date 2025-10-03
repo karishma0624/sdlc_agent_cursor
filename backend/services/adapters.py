@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from PIL import Image
 import io
 import os
@@ -13,16 +13,66 @@ class InferenceRouter:
 	def __init__(self) -> None:
 		self.providers = self._detect_providers()
 
+	def refresh(self) -> None:
+		"""Re-detect providers (e.g., after loading .env)."""
+		self.providers = self._detect_providers()
+
 	def _detect_providers(self):
+		hf_key = os.getenv("HF_API_KEY") or os.getenv("HUGGINGFACE_API_KEY")
+		ollama_available = False
+		# Prefer explicit env, otherwise probe localhost
+		base = os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
+		try:
+			resp = requests.get(base.rstrip("/") + "/api/tags", timeout=1.5)
+			if resp.ok:
+				ollama_available = True
+		except Exception:
+			ollama_available = False
 		return {
 			"openai": bool(os.getenv("OPENAI_API_KEY")),
 			"gemini": bool(os.getenv("GEMINI_API_KEY")),
 			"mistral": bool(os.getenv("MISTRAL_API_KEY")),
 			"groq": bool(os.getenv("GROQ_API_KEY")),
-			"hf": bool(os.getenv("HF_API_KEY")),
+			"hf": bool(hf_key),
 			"perplexity": bool(os.getenv("PERPLEXITY_API_KEY")),
-			"ollama": bool(os.getenv("OLLAMA_BASE_URL")),
+			"ollama": bool(os.getenv("OLLAMA_BASE_URL")) or ollama_available,
+			"lovable": True,
+			"stitch": True,
+			"v0": bool(os.getenv("V0_API_KEY") or os.getenv("V0_DEV_API_KEY")),
 		}
+
+	def _get_hf_key(self) -> Optional[str]:
+		return os.getenv("HF_API_KEY") or os.getenv("HUGGINGFACE_API_KEY")
+	def run_tool(self, tool: str, prompt: str) -> Dict[str, Any]:
+		if tool == "v0":
+			try:
+				return self._v0_generate_frontend(prompt)
+			except Exception as e:
+				# Fall through to stitch/local
+				pass
+		if tool == "lovable":
+			# Placeholder: return a scaffold JSON
+			return {"files": {"README.md": "# Lovable scaffold\n"}, "provider": "lovable", "model": "free-tier"}
+		if tool == "stitch":
+			return {"files": {"frontend/App.jsx": "export default function App(){return <div>Stitch UI</div>}"}, "provider": "stitch", "model": "free-tier"}
+		# local codegen via LLMs
+		text = self.generate_text(prompt)
+		return {"text": text.get("output", ""), "provider": text.get("provider"), "model": text.get("model")}
+
+	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
+	def _v0_generate_frontend(self, prompt: str) -> Dict[str, Any]:
+		"""Call v0.dev to generate frontend assets. Requires V0_API_KEY and optional V0_API_BASE."""
+		api_key = os.getenv("V0_API_KEY") or os.getenv("V0_DEV_API_KEY")
+		base = os.getenv("V0_API_BASE", "https://api.v0.dev")
+		url = f"{base}/generate"
+		headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+		payload = {"task": "frontend_only", "stack": "react+tailwind", "prompt": prompt}
+		resp = requests.post(url, headers=headers, json=payload, timeout=90)
+		resp.raise_for_status()
+		data = resp.json()
+		# Expect {files: {path: content, ...}, instructions?: str}
+		files = data.get("files") or {}
+		return {"files": files, "provider": "v0", "model": data.get("model", "free"), "notes": data.get("instructions", "")}
 
 	def _available(self, *names):
 		return [n for n in names if self.providers.get(n)]
@@ -43,16 +93,17 @@ class InferenceRouter:
 		provider, model = self._pick_provider_for_vision()
 		return {"label": label, "confidence": confidence, "provider": provider, "model": model, "fallback": True}
 
-	def generate_text(self, prompt: str) -> Dict[str, Any]:
+	def generate_text(self, prompt: str, preference: Optional[List[str]] = None) -> Dict[str, Any]:
 		# Try providers in priority order, return first success
 		strategies: List[str] = []
-		if self.providers.get("openai"): strategies.append("openai")
-		if self.providers.get("mistral"): strategies.append("mistral")
-		if self.providers.get("groq"): strategies.append("groq")
-		if self.providers.get("gemini"): strategies.append("gemini")
-		if self.providers.get("perplexity"): strategies.append("perplexity")
-		if self.providers.get("hf"): strategies.append("hf")
-		if self.providers.get("ollama"): strategies.append("ollama")
+		if preference:
+			for name in preference:
+				if self.providers.get(name):
+					strategies.append(name)
+		# add remaining available providers not already included (OpenAI last)
+		for name in ["mistral","groq","gemini","perplexity","hf","ollama","openai"]:
+			if self.providers.get(name) and name not in strategies:
+				strategies.append(name)
 
 		for name in strategies:
 			try:
@@ -101,7 +152,7 @@ class InferenceRouter:
 
 	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
 	def _hf_classify(self, image: Image.Image):
-		api_key = os.getenv("HF_API_KEY")
+		api_key = self._get_hf_key()
 		headers = {"Authorization": f"Bearer {api_key}"}
 		# Use a general image classification model
 		url = "https://api-inference.huggingface.co/models/google/vit-base-patch16-224"

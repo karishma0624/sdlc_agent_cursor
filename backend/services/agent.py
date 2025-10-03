@@ -25,6 +25,8 @@ class AgentOrchestrator:
 		return path
 
 	def run(self, prompt: str) -> Dict[str, Any]:
+		# Always refresh providers in case env changed since startup
+		self.router.refresh()
 		run_dir = self._mk_run_dir(prompt or "task")
 		logs: List[Dict[str, Any]] = []
 
@@ -39,13 +41,19 @@ class AgentOrchestrator:
 			logs.append(entry)
 			self.db.save_log(stage=stage, provider=metadata.get("provider"), model=metadata.get("model"), success=success, message=message, metadata=metadata)
 
-		# Requirements
-		req = self.router.generate_text(f"Extract concise functional/non-functional requirements, constraints, acceptance criteria for: {prompt}")
+		# Requirements (prefer gemini/perplexity)
+		req = self.router.generate_text(
+			f"Extract concise functional/non-functional requirements, constraints, acceptance criteria for: {prompt}",
+			preference=["gemini","perplexity"],
+		)
 		self._write_text(os.path.join(run_dir, "requirements.md"), req.get("output", ""))
 		log("requirements", True, "requirements extracted", req)
 
-		# Design
-		design = self.router.generate_text(f"Create a Mermaid system diagram and an OpenAPI high-level outline for: {prompt}")
+		# Design (prefer gemini/perplexity)
+		design = self.router.generate_text(
+			f"Create a Mermaid system diagram and an OpenAPI high-level outline for: {prompt}",
+			preference=["gemini","perplexity"],
+		)
 		self._write_text(os.path.join(run_dir, "design.md"), design.get("output", ""))
 		log("design", True, "design generated", design)
 
@@ -55,7 +63,21 @@ class AgentOrchestrator:
 		os.makedirs(backend_dir, exist_ok=True)
 		os.makedirs(frontend_dir, exist_ok=True)
 		self._write_text(os.path.join(backend_dir, "main.py"), self._template_fastapi(prompt))
-		self._write_text(os.path.join(frontend_dir, "app.py"), self._template_streamlit(prompt))
+		# Attempt v0.dev frontend generation when key present, fallback to minimal UI
+		files = None
+		try:
+			if self.router.providers.get("v0"):
+				resp = self.router.run_tool("v0", f"TASK: frontend_only\nSTACK: react + tailwind\nOUTCOME: '{prompt}'")
+				files = resp.get("files") if isinstance(resp, dict) else None
+		except Exception:
+			files = None
+		if files:
+			for path, content in files.items():
+				fpath = os.path.join(frontend_dir, path)
+				os.makedirs(os.path.dirname(fpath), exist_ok=True)
+				self._write_text(fpath, content)
+		else:
+			self._write_text(os.path.join(frontend_dir, "app.py"), self._template_streamlit(prompt))
 		log("build", True, "scaffold created", {"provider": req.get("provider"), "model": req.get("model")})
 
 		# Tests

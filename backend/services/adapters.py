@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from PIL import Image
 import io
 import os
@@ -94,47 +94,80 @@ class InferenceRouter:
 		return {"label": label, "confidence": confidence, "provider": provider, "model": model, "fallback": True}
 
 	def generate_text(self, prompt: str, preference: Optional[List[str]] = None) -> Dict[str, Any]:
-		# Try providers in priority order, return first success
+		"""General text generation with token accounting.
+
+		Provider priority defaults to: gemini → perplexity → hf → mistral → groq → openai → ollama (unless overridden).
+		"""
 		strategies: List[str] = []
 		if preference:
 			for name in preference:
 				if self.providers.get(name):
 					strategies.append(name)
-		# add remaining available providers not already included (OpenAI last)
-		for name in ["mistral","groq","gemini","perplexity","hf","ollama","openai"]:
+		# Default priority per requirement
+		for name in ["gemini", "perplexity", "hf", "mistral", "groq", "openai", "ollama"]:
 			if self.providers.get(name) and name not in strategies:
 				strategies.append(name)
 
 		for name in strategies:
 			try:
-				if name == "openai":
-					text = self._openai_chat(prompt)
-					return {"output": text, "provider": "openai", "model": "gpt-4o-mini", "fallback": False}
-				if name == "mistral":
-					text = self._mistral_chat(prompt)
-					return {"output": text, "provider": "mistral", "model": "mistral-small-latest", "fallback": False}
-				if name == "groq":
-					text = self._groq_chat(prompt)
-					return {"output": text, "provider": "groq", "model": "llama-3.1-8b-instant", "fallback": False}
 				if name == "gemini":
-					text = self._gemini_chat(prompt)
-					return {"output": text, "provider": "gemini", "model": "gemini-1.5-flash", "fallback": False}
+					text, tokens = self._gemini_chat(prompt)
+					return {"output": text, "provider": "gemini", "model": "gemini-1.5-flash", "tokens": tokens, "fallback": False}
 				if name == "perplexity":
-					text = self._perplexity_chat(prompt)
-					return {"output": text, "provider": "perplexity", "model": "sonar-small-chat", "fallback": False}
+					text, tokens = self._perplexity_chat(prompt)
+					return {"output": text, "provider": "perplexity", "model": "sonar-small-chat", "tokens": tokens, "fallback": False}
 				if name == "hf":
-					text = self._hf_generate_text(prompt)
-					return {"output": text, "provider": "hf", "model": "Qwen2.5-7B-Instruct (inference)", "fallback": False}
+					text, tokens = self._hf_generate_text(prompt)
+					return {"output": text, "provider": "hf", "model": "Qwen2.5-7B-Instruct (inference)", "tokens": tokens, "fallback": False}
+				if name == "mistral":
+					text, tokens = self._mistral_chat(prompt)
+					return {"output": text, "provider": "mistral", "model": "mistral-small-latest", "tokens": tokens, "fallback": False}
+				if name == "groq":
+					text, tokens = self._groq_chat(prompt)
+					return {"output": text, "provider": "groq", "model": "llama-3.1-8b-instant", "tokens": tokens, "fallback": False}
+				if name == "openai":
+					text, tokens = self._openai_chat(prompt)
+					return {"output": text, "provider": "openai", "model": "gpt-4o-mini", "tokens": tokens, "fallback": False}
 				if name == "ollama":
-					text = self._ollama_chat(prompt)
-					return {"output": text, "provider": "ollama", "model": "codellama", "fallback": False}
+					text, tokens = self._ollama_chat(prompt)
+					return {"output": text, "provider": "ollama", "model": "codellama", "tokens": tokens, "fallback": False}
 			except Exception:
 				continue
 
-		# Minimal offline baseline
 		provider, model = self._pick_provider_for_codegen()
 		output = f"[baseline] You asked: {prompt}"
-		return {"output": output, "provider": provider, "model": model, "fallback": True}
+		return {"output": output, "provider": provider, "model": model, "tokens": len(output) // 4, "fallback": True}
+
+	def generate_code(self, instruction: str) -> Dict[str, Any]:
+		"""Ask providers (in required priority) to return a JSON object mapping file paths to contents.
+
+		The response is expected to be JSON. If not, we'll try to extract a JSON code block.
+		"""
+		prompt = (
+			"Return ONLY a JSON object where keys are relative file paths and values are file contents. "
+			"Do not include explanations. "
+			f"Instruction: {instruction}"
+		)
+		result = self.generate_text(prompt, preference=["gemini", "perplexity", "hf", "mistral", "groq", "openai"])  # priority enforced
+		text = result.get("output", "{}")
+		files: Dict[str, str] = {}
+		try:
+			files = self._parse_files_json(text)
+		except Exception:
+			# attempt to find JSON in code fences
+			import re, json as _json
+			m = re.search(r"```(?:json)?\n([\s\S]*?)```", text)
+			if m:
+				files = _json.loads(m.group(1))
+		result["files"] = files
+		return result
+
+	def _parse_files_json(self, text: str) -> Dict[str, str]:
+		import json as _json
+		data = _json.loads(text)
+		if not isinstance(data, dict):
+			raise ValueError("files payload is not a dict")
+		return {str(k): str(v) for k, v in data.items()}
 
 	def _pick_provider_for_vision(self):
 		order = ["openai", "gemini", "groq", "hf", "ollama"]
@@ -167,7 +200,7 @@ class InferenceRouter:
 		return best.get("label", "unknown"), best.get("score", 0.0)
 
 	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
-	def _hf_generate_text(self, prompt: str) -> str:
+	def _hf_generate_text(self, prompt: str) -> Tuple[str, int]:
 		api_key = os.getenv("HF_API_KEY")
 		headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 		# Use instruct-tuned model for text generation
@@ -176,13 +209,15 @@ class InferenceRouter:
 		resp = requests.post(url, headers=headers, json=payload, timeout=60)
 		resp.raise_for_status()
 		data = resp.json()
-		if isinstance(data, list) and data and "generated_text" in data[0]:
-			return data[0]["generated_text"]
-		# Some servers return {generated_text: str}
-		return data.get("generated_text", str(data))
+		text = (
+			data[0]["generated_text"]
+			if isinstance(data, list) and data and "generated_text" in data[0]
+			else data.get("generated_text", str(data))
+		)
+		return text, len(text) // 4
 
 	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
-	def _openai_chat(self, prompt: str) -> str:
+	def _openai_chat(self, prompt: str) -> Tuple[str, int]:
 		api_key = os.getenv("OPENAI_API_KEY")
 		headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 		url = "https://api.openai.com/v1/chat/completions"
@@ -197,10 +232,14 @@ class InferenceRouter:
 		resp = requests.post(url, headers=headers, json=payload, timeout=60)
 		resp.raise_for_status()
 		data = resp.json()
-		return data["choices"][0]["message"]["content"].strip()
+		text = data["choices"][0]["message"]["content"].strip()
+		tokens = int(data.get("usage", {}).get("total_tokens", 0))
+		if not tokens:
+			tokens = len(text) // 4
+		return text, tokens
 
 	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
-	def _mistral_chat(self, prompt: str) -> str:
+	def _mistral_chat(self, prompt: str) -> Tuple[str, int]:
 		api_key = os.getenv("MISTRAL_API_KEY")
 		headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 		url = "https://api.mistral.ai/v1/chat/completions"
@@ -208,10 +247,14 @@ class InferenceRouter:
 		resp = requests.post(url, headers=headers, json=payload, timeout=60)
 		resp.raise_for_status()
 		data = resp.json()
-		return data["choices"][0]["message"]["content"].strip()
+		text = data["choices"][0]["message"]["content"].strip()
+		tokens = int(data.get("usage", {}).get("total_tokens", 0)) if isinstance(data.get("usage"), dict) else 0
+		if not tokens:
+			tokens = len(text) // 4
+		return text, tokens
 
 	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
-	def _groq_chat(self, prompt: str) -> str:
+	def _groq_chat(self, prompt: str) -> Tuple[str, int]:
 		api_key = os.getenv("GROQ_API_KEY")
 		headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 		# Groq is OpenAI-compatible endpoint
@@ -220,10 +263,14 @@ class InferenceRouter:
 		resp = requests.post(url, headers=headers, json=payload, timeout=60)
 		resp.raise_for_status()
 		data = resp.json()
-		return data["choices"][0]["message"]["content"].strip()
+		text = data["choices"][0]["message"]["content"].strip()
+		tokens = int(data.get("usage", {}).get("total_tokens", 0)) if isinstance(data.get("usage"), dict) else 0
+		if not tokens:
+			tokens = len(text) // 4
+		return text, tokens
 
 	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
-	def _gemini_chat(self, prompt: str) -> str:
+	def _gemini_chat(self, prompt: str) -> Tuple[str, int]:
 		api_key = os.getenv("GEMINI_API_KEY")
 		headers = {"Content-Type": "application/json"}
 		url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
@@ -236,10 +283,14 @@ class InferenceRouter:
 		if not cands:
 			return ""
 		parts = cands[0].get("content", {}).get("parts", [])
-		return "\n".join(p.get("text", "") for p in parts if isinstance(p, dict))
+		text = "\n".join(p.get("text", "") for p in parts if isinstance(p, dict))
+		tokens = int(data.get("usageMetadata", {}).get("totalTokenCount", 0)) if isinstance(data.get("usageMetadata"), dict) else 0
+		if not tokens:
+			tokens = len(text) // 4
+		return text, tokens
 
 	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
-	def _perplexity_chat(self, prompt: str) -> str:
+	def _perplexity_chat(self, prompt: str) -> Tuple[str, int]:
 		api_key = os.getenv("PERPLEXITY_API_KEY")
 		headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 		url = "https://api.perplexity.ai/chat/completions"
@@ -247,16 +298,21 @@ class InferenceRouter:
 		resp = requests.post(url, headers=headers, json=payload, timeout=60)
 		resp.raise_for_status()
 		data = resp.json()
-		return data["choices"][0]["message"]["content"].strip()
+		text = data["choices"][0]["message"]["content"].strip()
+		tokens = int(data.get("usage", {}).get("total_tokens", 0)) if isinstance(data.get("usage"), dict) else 0
+		if not tokens:
+			tokens = len(text) // 4
+		return text, tokens
 
 	@retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
-	def _ollama_chat(self, prompt: str) -> str:
+	def _ollama_chat(self, prompt: str) -> Tuple[str, int]:
 		base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 		url = f"{base}/api/generate"
 		payload = {"model": "codellama", "prompt": prompt, "stream": False}
 		resp = requests.post(url, json=payload, timeout=60)
 		resp.raise_for_status()
 		data = resp.json()
-		return data.get("response", "")
+		text = data.get("response", "")
+		return text, len(text) // 4
 
 

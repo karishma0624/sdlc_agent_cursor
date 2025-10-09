@@ -2,6 +2,8 @@ from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+import threading
+import uuid
 import io
 from PIL import Image
 import base64
@@ -14,6 +16,7 @@ from .services.adapters import InferenceRouter
 from .services.storage import DatabaseService
 from .services.rag import RagService
 from .services.agent import AgentOrchestrator
+from .services.sdlc_builder import SDLCBuilder
 from .services.classify import classify_prompt, pick_tool
 from .services.security import scrub_files, append_audit
 import json
@@ -50,6 +53,11 @@ router = InferenceRouter()
 db = DatabaseService()
 rag = RagService(db)
 agent = AgentOrchestrator()
+builder = SDLCBuilder()
+
+# --- Simple background job registry for SDLC builds ---
+_BUILD_JOBS_LOCK = threading.Lock()
+_BUILD_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
 @app.get("/health")
@@ -183,6 +191,108 @@ def build_project(req: BuildRequest, request: Request = None) -> Dict[str, Any]:
 	report = agent.run(req.prompt)
 	logger.info("/build completed: summary=%s", report.get("summary"))
 	return report
+
+
+class SDLCBuildRequest(BaseModel):
+    prompt: str
+
+
+@app.post("/sdlc/build")
+def sdlc_build(req: SDLCBuildRequest, request: Request = None) -> Dict[str, Any]:
+    logger.info("/sdlc/build called: client=%s prompt_len=%s", getattr(getattr(request, 'client', None), 'host', None), len(req.prompt or ""))
+
+    job_id = uuid.uuid4().hex
+    started_at = datetime.utcnow().isoformat()
+
+    with _BUILD_JOBS_LOCK:
+        _BUILD_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "prompt_len": len(req.prompt or ""),
+            "started_at": started_at,
+            "finished_at": None,
+            "run_dir": None,
+            "error": None,
+        }
+
+    def _run_build(job_id: str, prompt: str) -> None:
+        try:
+            logger.info("[job %s] build started", job_id)
+            result = builder.build(prompt)
+            run_dir = result.get("run_dir")
+            # Persist status to run directory
+            try:
+                if run_dir:
+                    status_path = pathlib.Path(run_dir) / "status.json"
+                    status_obj = {
+                        "job_id": job_id,
+                        "status": "completed",
+                        "started_at": started_at,
+                        "finished_at": datetime.utcnow().isoformat(),
+                        "run_dir": run_dir,
+                        "summary": result.get("summary"),
+                    }
+                    status_path.write_text(json.dumps(status_obj, indent=2), encoding="utf-8")
+            except Exception as e:
+                logger.warning("[job %s] failed to write status.json: %s", job_id, e)
+            finally:
+                with _BUILD_JOBS_LOCK:
+                    if job_id in _BUILD_JOBS:
+                        _BUILD_JOBS[job_id]["status"] = "completed"
+                        _BUILD_JOBS[job_id]["finished_at"] = datetime.utcnow().isoformat()
+                        _BUILD_JOBS[job_id]["run_dir"] = run_dir
+            logger.info("/sdlc/build completed: dir=%s job_id=%s", run_dir, job_id)
+        except Exception as e:
+            logger.exception("[job %s] build failed: %s", job_id, e)
+            with _BUILD_JOBS_LOCK:
+                if job_id in _BUILD_JOBS:
+                    _BUILD_JOBS[job_id]["status"] = "failed"
+                    _BUILD_JOBS[job_id]["finished_at"] = datetime.utcnow().isoformat()
+                    _BUILD_JOBS[job_id]["error"] = str(e)
+
+    t = threading.Thread(target=_run_build, args=(job_id, req.prompt), daemon=True)
+    t.start()
+
+    return {"status": "build_started", "job_id": job_id}
+
+
+@app.get("/sdlc/status")
+def sdlc_status(job_id: Optional[str] = None) -> Dict[str, Any]:
+    with _BUILD_JOBS_LOCK:
+        if job_id:
+            job = _BUILD_JOBS.get(job_id)
+            return job or {"error": "job_not_found", "job_id": job_id}
+        # Return latest job by started_at
+        if not _BUILD_JOBS:
+            return {"jobs": []}
+        latest = max(_BUILD_JOBS.values(), key=lambda j: j.get("started_at") or "")
+        return {"latest": latest, "jobs_count": len(_BUILD_JOBS)}
+
+
+@app.get("/sdlc/report")
+def sdlc_report(job_id: Optional[str] = None, run_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Return the run_report.json for a completed build.
+
+    One of job_id or run_dir must be provided.
+    """
+    target_dir: Optional[str] = None
+    if job_id:
+        with _BUILD_JOBS_LOCK:
+            job = _BUILD_JOBS.get(job_id)
+            if job and isinstance(job.get("run_dir"), str):
+                target_dir = job.get("run_dir")
+    if not target_dir and run_dir:
+        target_dir = run_dir
+    if not target_dir:
+        return {"error": "missing_job_id_or_run_dir"}
+    report_path = pathlib.Path(str(target_dir)) / "run_report.json"
+    if not report_path.exists():
+        return {"error": "report_not_found", "run_dir": str(target_dir)}
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        return data
+    except Exception as e:
+        return {"error": "report_read_error", "message": str(e)}
 
 
 class DispatchRequest(BaseModel):

@@ -9,10 +9,11 @@ from .metrics import MetricsLogger
 
 
 class SDLCBuilder:
-    def __init__(self, runs_dir: str = "runs") -> None:
+    def __init__(self, runs_dir: str = "runs", fast_mode: bool = False) -> None:
         self.router = InferenceRouter()
         self.metrics = MetricsLogger()
         self.runs_dir = runs_dir
+        self.fast_mode = fast_mode
         os.makedirs(self.runs_dir, exist_ok=True)
 
     def _mk_run_dir(self, title: str) -> str:
@@ -49,15 +50,19 @@ class SDLCBuilder:
             })
             self.metrics.log_stage(task_name=task_name, stage=stage, success=success, models_used=models_used, files_generated=files_generated, errors=errors, metadata=metadata)
 
-        # Phase 1 – Requirements (Gemini → OpenAI)
+        # Phase 1 – Requirements (FAST: templates only; otherwise Gemini → OpenAI)
         req_models = {}
         req_md = ""
         req_json: Dict[str, Any] = {}
         try:
-            res_g = self.router.generate_text(f"Extract detailed, structured requirements (title, description, modules, frontend stack, backend stack, DB schema, API routes, features, deployment) for: {prompt}", preference=["gemini"]) if self.router.providers.get("gemini") else {"output": "", "provider": None, "model": None}
-            res_o = self.router.generate_text(f"Refine the following requirements to be concise and actionable and return improved text only:\n\n{res_g.get('output','')}", preference=["openai"]) if self.router.providers.get("openai") else {"output": res_g.get("output",""), "provider": None, "model": None}
-            req_models = {"gemini": res_g.get("model"), "openai": res_o.get("model")}
-            req_md = res_o.get("output") or res_g.get("output") or ""
+            if self.fast_mode:
+                req_md = f"# Requirements\n\nProject: {prompt[:64] or 'Project'}\n\n- Frontend: React + Vite + TailwindCSS\n- Backend: FastAPI + SQLite\n- Features: CRUD, Search, Health check, Providers\n- Deployment: Docker + GitHub Actions\n"
+                req_models = {"mode": "fast"}
+            else:
+                res_g = self.router.generate_text(f"Extract detailed, structured requirements (title, description, modules, frontend stack, backend stack, DB schema, API routes, features, deployment) for: {prompt}", preference=["gemini"]) if self.router.providers.get("gemini") else {"output": "", "provider": None, "model": None}
+                res_o = self.router.generate_text(f"Refine the following requirements to be concise and actionable and return improved text only:\n\n{res_g.get('output','')}", preference=["openai"]) if self.router.providers.get("openai") else {"output": res_g.get("output",""), "provider": None, "model": None}
+                req_models = {"gemini": res_g.get("model"), "openai": res_o.get("model")}
+                req_md = res_o.get("output") or res_g.get("output") or ""
             req_json = {
                 "title": prompt[:64] or "Project",
                 "description": prompt,
@@ -74,27 +79,28 @@ class SDLCBuilder:
         except Exception as e:
             record("requirements", False, req_models, 0, str(e))
 
-        # Phase 2 – Backend Generation (Gemini → Perplexity → HF → Mistral → Groq → OpenAI)
+        # Phase 2 – Backend Generation (FAST: scaffold; otherwise LLM + scaffold)
         be_models = {}
         try:
             backend_root = os.path.join(run_dir, "backend")
             for d in ["routes", "models", "services", "tests"]:
                 os.makedirs(os.path.join(backend_root, d), exist_ok=True)
             # Generate domain-specific backend from prompt
-            instruction = (
-                "Create a FastAPI backend with modular structure (main.py, routes/, models/, services/). "
-                "Include CRUD routes for key entities derived from the prompt. Provide pytest tests in backend/tests. "
-                "Return ONLY a JSON mapping file paths to contents."
-            )
-            gen = self.router.generate_code(f"{instruction}\nPrompt: {prompt}")
-            files = gen.get("files") or {}
-            be_models = {"provider": gen.get("provider"), "model": gen.get("model"), "tokens": gen.get("tokens")}
             written = 0
-            if isinstance(files, dict) and files:
-                for rel, content in files.items():
-                    path = os.path.join(backend_root, rel)
-                    self._write_text(path, content)
-                    written += 1
+            if not self.fast_mode:
+                instruction = (
+                    "Create a FastAPI backend with modular structure (main.py, routes/, models/, services/). "
+                    "Include CRUD routes for key entities derived from the prompt. Provide pytest tests in backend/tests. "
+                    "Return ONLY a JSON mapping file paths to contents."
+                )
+                gen = self.router.generate_code(f"{instruction}\nPrompt: {prompt}")
+                files = gen.get("files") or {}
+                be_models = {"provider": gen.get("provider"), "model": gen.get("model"), "tokens": gen.get("tokens")}
+                if isinstance(files, dict) and files:
+                    for rel, content in files.items():
+                        path = os.path.join(backend_root, rel)
+                        self._write_text(path, content)
+                        written += 1
             # Ensure minimum scaffold exists
             if written == 0:
                 self._write_text(os.path.join(backend_root, "main.py"), _TEMPLATE_FASTAPI_MAIN)
@@ -111,33 +117,52 @@ class SDLCBuilder:
         except Exception as e:
             record("backend", False, be_models, 0, str(e))
 
-        # Phase 3 – Frontend Generation (v0.dev)
+        # Phase 3 – Frontend Generation (Prefer v0.dev; fallback to local React + Tailwind scaffold)
         fe_models = {}
         try:
             frontend_root = os.path.join(run_dir, "frontend")
             files_written = 0
-            if self.router.providers.get("v0"):
-                resp = self.router.run_tool("v0", f"Build a production-ready React + Tailwind frontend for: {prompt}. Include pages, components, routing, and a clean UI.")
+            files_created: set[str] = set()
+            used_v0 = False
+            if (not self.fast_mode) and self.router.providers.get("v0"):
+                resp = self.router.run_tool(
+                    "v0",
+                    (
+                        "Create a modern, attractive React (Vite) + Tailwind frontend that consumes the following API base "
+                        "(env VITE_API_BASE, default http://localhost:8000). Include a home page that shows API status and a card grid "
+                        "of available endpoints by fetching '/' (API index) and '/providers'. Create clean components and responsive layout."
+                    ),
+                )
                 files = resp.get("files") if isinstance(resp, dict) else None
                 fe_models = {"provider": "v0", "model": (resp.get("model") if isinstance(resp, dict) else None)}
                 if files:
+                    used_v0 = True
                     for rel, content in files.items():
                         path = os.path.join(frontend_root, rel)
                         self._write_text(path, content)
                         files_written += 1
-            if files_written == 0:
-                # fallback local React + Tailwind scaffold
-                self._write_text(os.path.join(frontend_root, "package.json"), _TEMPLATE_PACKAGE_JSON)
-                self._write_text(os.path.join(frontend_root, "tailwind.config.js"), _TEMPLATE_TAILWIND_CONFIG)
-                self._write_text(os.path.join(frontend_root, "postcss.config.js"), _TEMPLATE_POSTCSS)
-                self._write_text(os.path.join(frontend_root, "vite.config.js"), _TEMPLATE_VITE)
-                self._write_text(os.path.join(frontend_root, "index.html"), _TEMPLATE_INDEX_HTML)
-                self._write_text(os.path.join(frontend_root, "src", "main.jsx"), _TEMPLATE_MAIN_JSX)
-                self._write_text(os.path.join(frontend_root, "src", "App.jsx"), _TEMPLATE_APP_JSX)
-                self._write_text(os.path.join(frontend_root, "src", "index.css"), _TEMPLATE_INDEX_CSS)
-                files_written = 8
+                        files_created.add(rel.replace("\\", "/"))
+            # Ensure minimum scaffold exists even if v0 returned partial files
+            def ensure(rel_path: str, content: str) -> None:
+                nonlocal files_written
+                normalized = rel_path.replace("\\", "/")
+                if normalized not in files_created:
+                    self._write_text(os.path.join(frontend_root, rel_path), content)
+                    files_written += 1
+                    files_created.add(normalized)
+
+            # Baseline scaffold
+            ensure("package.json", _TEMPLATE_PACKAGE_JSON)
+            ensure("tailwind.config.js", _TEMPLATE_TAILWIND_CONFIG)
+            ensure("postcss.config.js", _TEMPLATE_POSTCSS)
+            ensure("vite.config.js", _TEMPLATE_VITE)
+            ensure("index.html", _TEMPLATE_INDEX_HTML)
+            ensure(os.path.join("src", "main.jsx"), _TEMPLATE_MAIN_JSX)
+            ensure(os.path.join("src", "index.css"), _TEMPLATE_INDEX_CSS)
+            # App with API list (only create if not provided by v0)
+            ensure(os.path.join("src", "App.jsx"), _TEMPLATE_APP_JSX)
             artifacts["frontend"] = {"root": frontend_root}
-            record("frontend", True, fe_models, files_written, None)
+            record("frontend", True, {**fe_models, "used_v0": used_v0}, files_written, None)
         except Exception as e:
             record("frontend", False, fe_models, 0, str(e))
 
@@ -157,23 +182,24 @@ class SDLCBuilder:
         except Exception as e:
             record("deployment", False, td_models, 0, str(e))
 
-        # Auto diagnostics (pytest + flake8) after build
-        try:
-            import subprocess, shlex
-            def run_cmd(cmd: str, timeout: int = 180) -> Dict[str, Any]:
-                try:
-                    proc = subprocess.run(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False, text=True)
-                    return {"code": proc.returncode, "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]}
-                except subprocess.TimeoutExpired:
-                    return {"code": -1, "stdout": "", "stderr": "timeout"}
-            junit_json = os.path.join(run_dir, "pytest-report.json")
-            pytest_cmd = f"pytest -q --maxfail=1 --disable-warnings --json-report --json-report-file={junit_json}"
-            flake8_cmd = "flake8"
-            pr = run_cmd(pytest_cmd, timeout=240)
-            fr = run_cmd(flake8_cmd, timeout=120)
-            self.metrics.log_stage(task_name=task_name, stage="diagnostics", success=(pr["code"] == 0 and fr["code"] == 0), models_used={}, files_generated=0, errors=None, metadata={"pytest": pr["code"], "flake8": fr["code"]})
-        except Exception:
-            pass
+        # Auto diagnostics (skip in FAST mode)
+        if not self.fast_mode:
+            try:
+                import subprocess, shlex
+                def run_cmd(cmd: str, timeout: int = 180) -> Dict[str, Any]:
+                    try:
+                        proc = subprocess.run(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False, text=True)
+                        return {"code": proc.returncode, "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]}
+                    except subprocess.TimeoutExpired:
+                        return {"code": -1, "stdout": "", "stderr": "timeout"}
+                junit_json = os.path.join(run_dir, "pytest-report.json")
+                pytest_cmd = f"pytest -q --maxfail=1 --disable-warnings --json-report --json-report-file={junit_json}"
+                flake8_cmd = "flake8"
+                pr = run_cmd(pytest_cmd, timeout=240)
+                fr = run_cmd(flake8_cmd, timeout=120)
+                self.metrics.log_stage(task_name=task_name, stage="diagnostics", success=(pr["code"] == 0 and fr["code"] == 0), models_used={}, files_generated=0, errors=None, metadata={"pytest": pr["code"], "flake8": fr["code"]})
+            except Exception:
+                pass
 
         # Phase 5 – Documentation (Gemini + OpenAI)
         doc_models = {}
@@ -310,12 +336,13 @@ Welcome! Use the README for quickstart. This site can be served with `mkdocs ser
 _TEMPLATE_PACKAGE_JSON = """{
   "name": "generated-frontend",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview --port 5173"
+    "preview": "vite preview --port 5173",
+    "start": "vite preview --host 0.0.0.0 --port 5173"
   },
   "dependencies": {
     "react": "^18.2.0",
@@ -396,21 +423,70 @@ html, body, #root { height: 100%; }
 
 _TEMPLATE_APP_JSX = """import { useEffect, useState } from 'react'
 
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+
+function EndpointCard({ item }) {
+  return (
+    <div className="rounded-lg border p-4 bg-white shadow-sm">
+      <div className="text-xs uppercase tracking-wide text-gray-500">{item.method}</div>
+      <div className="font-mono text-sm break-all">{item.path}</div>
+      {item.desc && <div className="text-sm text-gray-600 mt-1">{item.desc}</div>}
+    </div>
+  )
+}
+
 export default function App() {
   const [status, setStatus] = useState('unknown')
+  const [providers, setProviders] = useState({})
+  const [apiIndex, setApiIndex] = useState({ endpoints: [], docs: {} })
+
   useEffect(() => {
-    fetch('http://localhost:8000/health').then(r => setStatus(r.ok ? 'online' : 'offline')).catch(() => setStatus('offline'))
+    fetch(`${API_BASE}/health`).then(r => setStatus(r.ok ? 'online' : 'offline')).catch(() => setStatus('offline'))
+    fetch(`${API_BASE}/providers`).then(r => r.json()).then(d => setProviders(d.providers || {})).catch(() => setProviders({}))
+    fetch(`${API_BASE}/`).then(r => r.json()).then(d => setApiIndex(d || { endpoints: [], docs: {} })).catch(() => setApiIndex({ endpoints: [], docs: {} }))
   }, [])
+
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900">
-      <header className="p-4 border-b bg-white">
-        <h1 className="text-xl font-semibold">Generated Frontend</h1>
-        <p className="text-sm text-gray-500">API status: {status}</p>
+    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 text-gray-900">
+      <header className="p-6 border-b bg-white/80 backdrop-blur">
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold">Generated Frontend</h1>
+            <p className="text-sm text-gray-500">API status: <span className={status === 'online' ? 'text-green-600' : 'text-red-600'}>{status}</span></p>
+          </div>
+          <div className="text-sm text-gray-600">
+            <a className="underline mr-3" href={`${API_BASE}/docs`} target="_blank" rel="noreferrer">Swagger</a>
+            <a className="underline" href={`${API_BASE}/redoc`} target="_blank" rel="noreferrer">ReDoc</a>
+          </div>
+        </div>
       </header>
       <main className="p-6">
-        <div className="max-w-xl mx-auto bg-white shadow rounded p-4">
-          <h2 className="text-lg font-medium mb-2">Welcome</h2>
-          <p>Project: {document.title}</p>
+        <div className="max-w-6xl mx-auto grid gap-6 md:grid-cols-12">
+          <section className="md:col-span-4">
+            <div className="bg-white rounded-xl shadow p-5">
+              <h2 className="text-lg font-medium mb-3">Providers</h2>
+              <ul className="space-y-1">
+                {Object.entries(providers).map(([k,v]) => (
+                  <li key={k} className="flex items-center justify-between">
+                    <span className="font-mono text-sm">{k}</span>
+                    <span className={v ? 'text-green-600' : 'text-red-600'}>{v ? 'available' : 'unavailable'}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </section>
+          <section className="md:col-span-8">
+            <div className="bg-white rounded-xl shadow p-5">
+              <h2 className="text-lg font-medium mb-3">API Endpoints</h2>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {apiIndex.endpoints && apiIndex.endpoints.length > 0 ? (
+                  apiIndex.endpoints.map((ep, i) => <EndpointCard key={i} item={ep} />)
+                ) : (
+                  <div className="text-sm text-gray-500">No endpoints loaded.</div>
+                )}
+              </div>
+            </div>
+          </section>
         </div>
       </main>
     </div>

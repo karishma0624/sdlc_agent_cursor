@@ -28,6 +28,36 @@ app = FastAPI(title="Autonomous SDLC Agent API")
 logger = logging.getLogger("uvicorn.error")
 
 
+@app.get("/")
+def api_index() -> Dict[str, Any]:
+    """Return a simple API index with available endpoints and descriptions."""
+    return {
+        "title": "Autonomous SDLC Agent API",
+        "endpoints": [
+            {"method": "GET", "path": "/", "desc": "API index"},
+            {"method": "GET", "path": "/health", "desc": "Health check"},
+            {"method": "GET", "path": "/providers", "desc": "Provider availability"},
+            {"method": "GET", "path": "/logs", "desc": "Recent logs"},
+            {"method": "POST", "path": "/predict", "desc": "Image classification demo"},
+            {"method": "POST", "path": "/task", "desc": "Generic text/code task"},
+            {"method": "POST", "path": "/build", "desc": "High-level build orchestrator"},
+            {"method": "POST", "path": "/sdlc/build", "desc": "Async full SDLC builder"},
+            {"method": "GET", "path": "/sdlc/status", "desc": "Latest or specific job status"},
+            {"method": "GET", "path": "/sdlc/report", "desc": "Fetch run_report.json"},
+            {"method": "POST", "path": "/dispatch", "desc": "Classify and run best-fit tool"},
+            {"method": "POST", "path": "/materialize", "desc": "Write generated files to runs/"},
+            {"method": "POST", "path": "/diagnostics", "desc": "Run pytest and flake8"},
+            {"method": "POST", "path": "/save_spec", "desc": "Persist requirements markdown"},
+            {"method": "CRUD", "path": "/students", "desc": "Students CRUD (list/create)"},
+            {"method": "CRUD", "path": "/students/{id}", "desc": "Students CRUD (get/update/delete)"},
+            {"method": "CRUD", "path": "/events", "desc": "Events CRUD (list/create)"},
+            {"method": "CRUD", "path": "/events/{id}", "desc": "Events CRUD (get/update/delete)"},
+            {"method": "CRUD", "path": "/requirements", "desc": "Requirements CRUD (list/create)"},
+            {"method": "CRUD", "path": "/requirements/{id}", "desc": "Requirements CRUD (get/update/delete)"},
+        ],
+        "docs": {"swagger": "/docs", "redoc": "/redoc"},
+    }
+
 app.add_middleware(
 	CORSMiddleware,
 	allow_origins=["*"],
@@ -53,7 +83,7 @@ router = InferenceRouter()
 db = DatabaseService()
 rag = RagService(db)
 agent = AgentOrchestrator()
-builder = SDLCBuilder()
+builder = SDLCBuilder(fast_mode=bool(os.getenv("SDLC_FAST", "1") in ("1", "true", "True")))
 
 # --- Simple background job registry for SDLC builds ---
 _BUILD_JOBS_LOCK = threading.Lock()
@@ -519,10 +549,13 @@ def update_requirement(req_id: int, payload: RequirementIn) -> Dict[str, Any]:
 	success = db.update_requirement(req_id, payload.title, payload.content)
 	return {"success": bool(success)}
 
-
 @app.delete("/requirements/{req_id}")
 def delete_requirement(req_id: int) -> Dict[str, Any]:
 	success = db.delete_requirement(req_id)
 	return {"success": bool(success)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, reload=True)
 
 

@@ -33,7 +33,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -189,28 +189,59 @@ _BUILD_JOBS: Dict[str, Dict[str, Any]] = load_jobs()
 
 class BuildRequest(BaseModel):
     prompt: str
+    job_id: Optional[str] = None
 
 @app.post("/sdlc/build")
 def sdlc_build(req: BuildRequest):
-    job_id = uuid.uuid4().hex
-    started_at = datetime.utcnow().isoformat()
-    
-    # 1. Initialize Run (Create Dir & status.json) synchronously
-    run_dir = builder.init_run(req.prompt)
-    
-    # 2. Update Status Storage (Persist immediately)
-    with _LOCK:
-        _BUILD_JOBS[job_id] = {
-            "job_id": job_id,
-            "status": "running",
-            "prompt": req.prompt,
-            "started_at": started_at,
-            "finished_at": None,
-            "run_dir": run_dir,
-            "summary": None,
-            "error": None
-        }
-        save_jobs(_BUILD_JOBS)
+    # Determine if this is a new run or continuation
+    if req.job_id:
+        # Continuation logic
+        job_id = req.job_id
+        with _LOCK:
+            current_job = _BUILD_JOBS.get(job_id)
+            if current_job:
+                run_dir = current_job.get("run_dir")
+                started_at = current_job.get("started_at")
+                # Reset status to running
+                current_job["status"] = "running"
+                current_job["finished_at"] = None
+                current_job["error"] = None
+                current_job["prompt"] = req.prompt # Update prompt context? Or keep history? For now simpler: overwrite
+                save_jobs(_BUILD_JOBS)
+            else:
+                 # fallback if ID invalid
+                 job_id = uuid.uuid4().hex
+                 started_at = datetime.utcnow().isoformat()
+                 run_dir = builder.init_run(req.prompt, job_id=job_id)
+                 _BUILD_JOBS[job_id] = {
+                    "job_id": job_id,
+                    "status": "running",
+                    "prompt": req.prompt,
+                    "started_at": started_at,
+                    "finished_at": None,
+                    "run_dir": run_dir,
+                    "summary": None,
+                    "error": None
+                }
+                 save_jobs(_BUILD_JOBS)
+    else:
+        # New Run
+        job_id = uuid.uuid4().hex
+        started_at = datetime.utcnow().isoformat()
+        run_dir = builder.init_run(req.prompt, job_id=job_id)
+        
+        with _LOCK:
+            _BUILD_JOBS[job_id] = {
+                "job_id": job_id,
+                "status": "running",
+                "prompt": req.prompt,
+                "started_at": started_at,
+                "finished_at": None,
+                "run_dir": run_dir,
+                "summary": None,
+                "error": None
+            }
+            save_jobs(_BUILD_JOBS)
 
     # 3. Start Background Build
     def _run_build(job_id: str, run_dir: str, prompt: str):
@@ -235,7 +266,6 @@ def sdlc_build(req: BuildRequest):
                     job["error"] = str(e)
                     save_jobs(_BUILD_JOBS)
                 
-                # Also update status.json to failed
                 try:
                     p = os.path.join(run_dir, "status.json")
                     if os.path.exists(p):
@@ -256,12 +286,17 @@ def sdlc_build(req: BuildRequest):
         "run_dir": run_dir
     }
 
+@app.get("/runs")
+def list_runs():
+    """Return historical runs for the sidebar."""
+    current_jobs = load_jobs()
+    # Sort by started_at desc
+    sorted_jobs = sorted(current_jobs.values(), key=lambda x: x.get("started_at", ""), reverse=True)
+    return {"runs": sorted_jobs}
+
 @app.get("/sdlc/status")
 def sdlc_status(job_id: Optional[str] = None):
-    # Reload jobs to ensure we have latest state if modified by other workers (though Uvicorn reload restarts global state)
-    # Ideally for multi-worker we'd reload from file, but with single worker in-memory + write-through is fine.
-    # We will reload just in case.
-    # Note: Frequent reads might be slow but safety first.
+    # Reload jobs for safety
     current_jobs = load_jobs()
     
     if job_id:
@@ -275,7 +310,25 @@ def sdlc_status(job_id: Optional[str] = None):
                 "finished_at": None,
                 "run_dir": None
             }
+            
+        # Enrich with live status from status.json if running/completed
+        run_dir = job.get("run_dir")
+        if run_dir:
+            try:
+                p = os.path.join(run_dir, "status.json")
+                if os.path.exists(p):
+                    with open(p, "r") as f:
+                        live_status = json.load(f)
+                        # Merge vital fields for UI
+                        job["current_stage"] = live_status.get("current_stage")
+                        job["provider_used"] = live_status.get("provider_used")
+                        job["status_message"] = live_status.get("status_message")
+                        job["execution_log"] = live_status.get("execution_log", [])
+            except:
+                pass
+                
         return job
+        
     # List all
     return {"jobs": list(current_jobs.values())}
 

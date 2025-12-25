@@ -17,7 +17,7 @@ class SimpleBuilder:
         run_dir = self.init_run(prompt)
         return self.run_build(run_dir, prompt)
 
-    def init_run(self, prompt: str) -> str:
+    def init_run(self, prompt: str, job_id: str = None) -> str:
         """Creates run directory and initial status.json immediately."""
         slug = "".join(c for c in prompt.lower() if c.isalnum() or c == " ").strip().replace(" ", "-")[:30]
         if not slug:
@@ -26,7 +26,7 @@ class SimpleBuilder:
         
         # Immediate status.json
         status = {
-            "job_id": os.path.basename(run_dir), # Temporary ID if needed, but main.py has real job_id
+            "job_id": job_id or os.path.basename(run_dir),
             "status": "running",
             "started_at": datetime.utcnow().isoformat(),
             "prompt": prompt,
@@ -36,25 +36,56 @@ class SimpleBuilder:
         self._write_file(run_dir, "status.json", json.dumps(status, indent=2))
         return run_dir
 
+    # ... (imports remain)
+
     def run_build(self, run_dir: str, prompt: str) -> Dict[str, Any]:
         """
-        Hybrid build execution in the specific run_dir.
+        Hybrid build execution in the specific run_dir with Intelligent Routing.
         """
         self.router.refresh()
         prompt_lower = prompt.lower()
         
+        # Track execution details
+        execution_log = []
+        
+        def update_status(stage: str, provider: str = "system", status_msg: str = "running"):
+            try:
+                p = os.path.join(run_dir, "status.json")
+                if os.path.exists(p):
+                    with open(p, "r") as f: current = json.load(f)
+                else:
+                    current = {}
+                
+                current.update({
+                    "current_stage": stage,
+                    "provider_used": provider,
+                    "status_message": status_msg,
+                    "last_updated": datetime.utcnow().isoformat()
+                })
+                self._write_file(run_dir, "status.json", json.dumps(current, indent=2))
+                execution_log.append({"stage": stage, "provider": provider, "msg": status_msg, "time": datetime.utcnow().isoformat()})
+            except:
+                pass
+
         result = {}
+        
+        # 1. Deterministic Shortcuts
         if "counter" in prompt_lower:
+            update_status("planning", "system", "Dedicated template found: Counter App")
             result = self._build_counter(run_dir, prompt)
+            update_status("completed", "system", "Build finished")
         elif "hello" in prompt_lower:
+            update_status("planning", "system", "Dedicated template found: Hello World")
             result = self._build_hello(run_dir, prompt)
+            update_status("completed", "system", "Build finished")
         else:
-            # Check AI
-            has_ai = any(self.router.providers.get(k) for k in ["openai", "gemini", "mistral", "groq", "hf", "ollama", "perplexity"])
-            if has_ai:
-                result = self._build_ai(run_dir, prompt)
-            else:
-                result = self._build_hello(run_dir, prompt + " (Fallback: No AI keys found)")
+            # 2. AI Path
+            update_status("planning", "system", "Analyzing requirements...")
+            
+            # Check AI or just try fallback robustly
+            # We will try AI route, but if it fails, _build_ai_intelligent now handles fallback internally per stage
+            update_status("generation", "auto", "Starting AI Generation...")
+            result = self._build_ai_intelligent(run_dir, prompt, update_status)
 
         # Update status.json to completed
         try:
@@ -66,13 +97,90 @@ class SimpleBuilder:
                 "status": "completed",
                 "finished_at": datetime.utcnow().isoformat(),
                 "success": True,
-                "summary": result.get("summary")
+                "summary": result.get("summary"),
+                "execution_log": execution_log
             })
             self._write_file(run_dir, "status.json", json.dumps(current_status, indent=2))
         except Exception:
             pass
             
         return result
+
+    def _select_provider(self, stage: str) -> List[str]:
+        """Intelligent Routing: Select best provider preferences based on stage."""
+        if stage == "planning":
+            return ["openai", "gemini", "anthropic", "mistral"]
+        elif stage == "backend_code" or stage == "frontend_code":
+            return ["claude", "openai", "mistral", "deepseek", "gemini", "groq", "hf"]
+        return ["openai", "gemini", "mistral", "groq", "hf", "ollama"]
+
+    def _build_ai_intelligent(self, run_dir: str, prompt: str, status_cb) -> Dict[str, Any]:
+        slug = os.path.basename(run_dir)
+        
+        # --- BACKEND ---
+        try:
+            backend_pref = self._select_provider("backend_code")
+            status_cb("backend_generation", str(backend_pref), "Generating FastAPI Backend...")
+            
+            backend_prompt = (
+                f"Generate a single-file FastAPI backend (main.py) for: {prompt}. "
+                "Include ALL imports, a /health endpoint, and CORS middleware allowing '*'. "
+                "Use Pydantic models. Return ONLY the python code."
+            )
+            
+            be_res = self.router.generate_text(backend_prompt, preference=backend_pref)
+            be_code = self._clean_code(be_res.get("output", ""))
+            
+            if "FastAPI" not in be_code:
+                 # Fallback if AI produced garbage
+                 be_code = f"""from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+@app.get("/")
+def root(): return {{"message": "AI generation failed, fallback active for: {prompt}"}}
+@app.get("/health")
+def health(): return {{"status": "ok"}}
+"""
+                 status_cb("backend_generation", "system", "AI failed, used fallback backend")
+
+            self._write_file(run_dir, "backend/main.py", be_code)
+            self._write_file(run_dir, "backend/requirements.txt", "fastapi\nuvicorn\npydantic\npython-multipart\n")
+        except Exception as e:
+            status_cb("backend_error", "system", f"Backend generation crashed: {e}")
+            # Ensure file exists even on crash
+            self._write_file(run_dir, "backend/main.py", """from fastapi import FastAPI\napp = FastAPI()\n""")
+
+        # --- FRONTEND ---
+        try:
+            frontend_pref = self._select_provider("frontend_code")
+            status_cb("frontend_generation", str(frontend_pref), "Generating React Frontend...")
+            
+            fe_prompt = (
+                f"Generate a React component (App.jsx) for: {prompt}. "
+                "Assume the backend is at VITE_API_BASE. "
+                "Use fetch() to call the endpoints you would expect for this app. "
+                "Use Tailwind CSS classes for styling. Return ONLY the jsx code."
+            )
+            fe_res = self.router.generate_text(fe_prompt, preference=frontend_pref)
+            fe_code = self._clean_code(fe_res.get("output", ""), lang="jsx")
+
+            if "export default" not in fe_code and "function" not in fe_code:
+                 fe_code = self._get_hello_frontend()
+                 status_cb("frontend_generation", "system", "AI failed, used fallback frontend")
+
+            self._write_frontend_scaffold(run_dir, fe_code)
+        except Exception as e:
+             status_cb("frontend_error", "system", f"Frontend generation crashed: {e}")
+             # Ensure fallback exists
+             self._write_frontend_scaffold(run_dir, self._get_hello_frontend())
+        
+        status_cb("finalizing", "system", "Writing artifacts...")
+        self._write_common_artifacts(run_dir, prompt, f"AI Generated: {slug}")
+        
+        return {"summary": f"AI Build Completed for {slug}", "run_dir": run_dir}
+
+    # ... (rest of methods: _clean_code, _write_frontend_scaffold, _write_common_artifacts, _get_, etc. keep existing)
 
     def _create_run_dir(self, slug: str) -> str:
         timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")

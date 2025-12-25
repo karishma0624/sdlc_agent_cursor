@@ -155,52 +155,167 @@ def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 
-@app.get("/providers")
-def providers():
-    return {
-        "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
-        "GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY")),
-        "MISTRAL_API_KEY": bool(os.getenv("MISTRAL_API_KEY")),
-        "GROQ_API_KEY": bool(os.getenv("GROQ_API_KEY")),
-        "HUGGINGFACE_API_KEY": bool(os.getenv("HUGGINGFACE_API_KEY")),
-        "V0_API_KEY": bool(os.getenv("V0_API_KEY")),
-        "OLLAMA_BASE_URL": bool(os.getenv("OLLAMA_BASE_URL")),
-    }
 
 
 # -------------------------------------------------
-# SDLC BUILD (STUB – STABLE)
+# SDLC BUILD (REAL DETERMINISTIC)
 # -------------------------------------------------
-_BUILD_JOBS: Dict[str, Dict[str, Any]] = {}
+# -------------------------------------------------
+# SDLC BUILD (REAL DETERMINISTIC)
+# -------------------------------------------------
+from .simple_builder import SimpleBuilder
+
+JOBS_FILE = "jobs.json"
 _LOCK = threading.Lock()
+builder = SimpleBuilder(runs_dir="runs")
 
+def load_jobs() -> Dict[str, Dict[str, Any]]:
+    if os.path.exists(JOBS_FILE):
+        try:
+            with open(JOBS_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_jobs(jobs: Dict[str, Dict[str, Any]]):
+    try:
+        with open(JOBS_FILE, "w") as f:
+            json.dump(jobs, f, indent=2)
+    except:
+        pass
+
+_BUILD_JOBS: Dict[str, Dict[str, Any]] = load_jobs()
 
 class BuildRequest(BaseModel):
     prompt: str
 
-
 @app.post("/sdlc/build")
 def sdlc_build(req: BuildRequest):
     job_id = uuid.uuid4().hex
-
+    started_at = datetime.utcnow().isoformat()
+    
+    # 1. Initialize Run (Create Dir & status.json) synchronously
+    run_dir = builder.init_run(req.prompt)
+    
+    # 2. Update Status Storage (Persist immediately)
     with _LOCK:
         _BUILD_JOBS[job_id] = {
             "job_id": job_id,
-            "status": "completed",
+            "status": "running",
             "prompt": req.prompt,
-            "run_dir": f"runs/{job_id}",
-            "timestamp": datetime.utcnow().isoformat(),
+            "started_at": started_at,
+            "finished_at": None,
+            "run_dir": run_dir,
+            "summary": None,
+            "error": None
         }
+        save_jobs(_BUILD_JOBS)
 
-    return {"job_id": job_id, "status": "completed"}
+    # 3. Start Background Build
+    def _run_build(job_id: str, run_dir: str, prompt: str):
+        try:
+            # Execute actual build in the created dir
+            result = builder.run_build(run_dir, prompt)
+            
+            with _LOCK:
+                if job_id in _BUILD_JOBS:
+                    job = _BUILD_JOBS[job_id]
+                    job["status"] = "completed"
+                    job["finished_at"] = datetime.utcnow().isoformat()
+                    job["summary"] = result.get("summary")
+                    save_jobs(_BUILD_JOBS)
+                
+        except Exception as e:
+            with _LOCK:
+                if job_id in _BUILD_JOBS:
+                    job = _BUILD_JOBS[job_id]
+                    job["status"] = "failed"
+                    job["finished_at"] = datetime.utcnow().isoformat()
+                    job["error"] = str(e)
+                    save_jobs(_BUILD_JOBS)
+                
+                # Also update status.json to failed
+                try:
+                    p = os.path.join(run_dir, "status.json")
+                    if os.path.exists(p):
+                        with open(p, "r") as f: d = json.load(f)
+                        d.update({"status": "failed", "error": str(e)})
+                        with open(p, "w") as f: json.dump(d, f)
+                except:
+                    pass
 
+    t = threading.Thread(target=_run_build, args=(job_id, run_dir, req.prompt), daemon=True)
+    t.start()
+
+    # 4. Return IMMEDIATE Response with Run Dir
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "started_at": started_at,
+        "run_dir": run_dir
+    }
 
 @app.get("/sdlc/status")
 def sdlc_status(job_id: Optional[str] = None):
-    with _LOCK:
-        if job_id:
-            return _BUILD_JOBS.get(job_id, {"error": "not found"})
-        return {"jobs": list(_BUILD_JOBS.values())}
+    # Reload jobs to ensure we have latest state if modified by other workers (though Uvicorn reload restarts global state)
+    # Ideally for multi-worker we'd reload from file, but with single worker in-memory + write-through is fine.
+    # We will reload just in case.
+    # Note: Frequent reads might be slow but safety first.
+    current_jobs = load_jobs()
+    
+    if job_id:
+        job = current_jobs.get(job_id)
+        if not job:
+            return {
+                "job_id": job_id,
+                "status": "not_found",
+                "error": "Job not found",
+                "started_at": None,
+                "finished_at": None,
+                "run_dir": None
+            }
+        return job
+    # List all
+    return {"jobs": list(current_jobs.values())}
+
+@app.get("/providers")
+def get_providers():
+    builder.router.refresh()
+    # CONTRACT: Nested "providers" object with lowercase keys
+    p = builder.router.providers
+    return {
+        "providers": {
+            "openai": p.get("openai", False),
+            "gemini": p.get("gemini", False),
+            "mistral": p.get("mistral", False),
+            "groq": p.get("groq", False),
+            "hf": p.get("hf", False),
+            "ollama": p.get("ollama", False),
+            "v0": p.get("v0", False),
+            "perplexity": p.get("perplexity", False),
+            "lovable": p.get("lovable", False),
+            "stitch": p.get("stitch", False)
+        }
+    }
+
+@app.get("/sdlc/report")
+def sdlc_report(job_id: Optional[str] = None):
+    target_dir = None
+    current_jobs = load_jobs()
+    if job_id:
+        job = current_jobs.get(job_id)
+        if job:
+            target_dir = job.get("run_dir")
+    
+    if not target_dir:
+        return {"error": "job not found or no run_dir"}
+        
+    report_path = os.path.join(target_dir, "run_report.json")
+    if os.path.exists(report_path):
+        with open(report_path, "r") as f:
+            return json.load(f)
+    return {"error": "report missing"}
 
 
 # -------------------------------------------------

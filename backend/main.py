@@ -1,6 +1,7 @@
 # backend/main.py
 
 import os
+import json
 import threading
 import uuid
 from datetime import datetime, timedelta
@@ -165,89 +166,196 @@ def health():
 # -------------------------------------------------
 from .simple_builder import SimpleBuilder
 
+
 JOBS_FILE = "jobs.json"
 _LOCK = threading.Lock()
 builder = SimpleBuilder(runs_dir="runs")
 
+def rebuild_jobs_from_disk() -> Dict[str, Dict[str, Any]]:
+    """SCANS runs/ directory and rebuilds memory state from status.json files."""
+    jobs = {}
+    if not os.path.exists("runs"):
+        return jobs
+        
+    for dirname in os.listdir("runs"):
+        run_dir = os.path.join("runs", dirname)
+        status_path = os.path.join(run_dir, "status.json")
+        if os.path.isdir(run_dir) and os.path.exists(status_path):
+            try:
+                with open(status_path, "r") as f:
+                    job_data = json.load(f)
+                    # Backfill missing keys for old jobs
+                    if "job_id" not in job_data:
+                         job_data["job_id"] = dirname # Fallback
+                    
+                    # Ensure path is absolute/correct
+                    job_data["run_dir"] = run_dir
+                    
+                    jobs[job_data["job_id"]] = job_data
+            except Exception as e:
+                print(f"Skipping corrupt job {dirname}: {e}")
+    return jobs
+
 def load_jobs() -> Dict[str, Dict[str, Any]]:
-    if os.path.exists(JOBS_FILE):
-        try:
-            with open(JOBS_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+    # Always rebuild from disk to be authoritative
+    return rebuild_jobs_from_disk()
 
 def save_jobs(jobs: Dict[str, Dict[str, Any]]):
-    try:
-        with open(JOBS_FILE, "w") as f:
-            json.dump(jobs, f, indent=2)
-    except:
-        pass
+    # We no longer rely on a monolithic jobs.json. 
+    # Each job updates its own status.json.
+    # This function is kept for compatibility but does nothing or could update cache.
+    pass
 
-_BUILD_JOBS: Dict[str, Dict[str, Any]] = load_jobs()
+# Initial load
+_BUILD_JOBS: Dict[str, Dict[str, Any]] = rebuild_jobs_from_disk()
+
+@app.post("/sessions/new")
+def new_session():
+    job_id = uuid.uuid4().hex
+    started_at = datetime.utcnow().isoformat()
+    # Create an 'idle' job entry. We don't create a run_dir yet until the first build.
+    # OR better: create a placeholder dir so chat.json can exist immediately.
+    # Let's create the dir to strictly follow "One Job = One Session" rule.
+    run_dir = builder.init_run("New Session", job_id=job_id)
+    
+    with _LOCK:
+        _BUILD_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "idle",
+            "prompt": "New Session",
+            "started_at": started_at,
+            "finished_at": None,
+            "run_dir": run_dir,
+            "summary": None,
+            "error": None
+        }
+        save_jobs(_BUILD_JOBS)
+        
+    return {"job_id": job_id, "created_at": started_at, "status": "idle"}
 
 class BuildRequest(BaseModel):
-    prompt: str
-    job_id: Optional[str] = None
+    prompt: Optional[str] = None
+    job_id: str  # STRICT REQUIREMENT
+
+class ChatRequest(BaseModel):
+    job_id: str
+    message: str
+
+@app.post("/chat")
+def chat_endpoint(req: ChatRequest):
+    """
+    Handles follow-up chat messages.
+    1. Appends to chat.json
+    2. Triggers builder analysis (continuation)
+    """
+    global _BUILD_JOBS
+    
+    # Reload logic (Self-Healing)
+    if req.job_id not in _BUILD_JOBS:
+        _BUILD_JOBS = rebuild_jobs_from_disk()
+    
+    job = _BUILD_JOBS.get(req.job_id)
+    if not job:
+         raise HTTPException(status_code=404, detail="Job not found")
+         
+    run_dir = job["run_dir"]
+    
+    # 1. Persist User Message
+    chat_path = os.path.join(run_dir, "chat.json")
+    chat_log = []
+    if os.path.exists(chat_path):
+        try: 
+            with open(chat_path, "r") as f: chat_log = json.load(f)
+        except: pass
+        
+    chat_log.append({"role": "user", "content": req.message, "timestamp": datetime.utcnow().isoformat()})
+    with open(chat_path, "w") as f:
+        json.dump(chat_log, f, indent=2)
+        
+    # 2. Trigger Builder (Continuation)
+    # We update status to 'running' and let the builder decide if it needs to code or just reply.
+    # For now, we assume every message is a 'Prompt' that might need code changes.
+    
+    job["status"] = "running"
+    job["prompt"] = req.message # Update active prompt context
+    job["status_message"] = "Analyzing request..."
+    
+    # Sync to disk
+    p = os.path.join(run_dir, "status.json")
+    if os.path.exists(p):
+        with open(p, "r") as f: d = json.load(f)
+        d.update({"status": "running", "status_message": "Analyzing request..."})
+        with open(p, "w") as f: json.dump(d, f)
+
+    def _run_continuation(job_id, run_dir, msg):
+        try:
+            builder.run_build(run_dir, msg)
+        except Exception as e:
+            # Error handling handled inside run_build usually, but safety net
+            pass
+
+    t = threading.Thread(target=_run_continuation, args=(req.job_id, run_dir, req.message), daemon=True)
+    t.start()
+    
+    return {"status": "processing", "job_id": req.job_id}
 
 @app.post("/sdlc/build")
 def sdlc_build(req: BuildRequest):
-    # Determine if this is a new run or continuation
-    if req.job_id:
-        # Continuation logic
-        job_id = req.job_id
-        with _LOCK:
-            current_job = _BUILD_JOBS.get(job_id)
-            if current_job:
-                run_dir = current_job.get("run_dir")
-                started_at = current_job.get("started_at")
-                # Reset status to running
-                current_job["status"] = "running"
-                current_job["finished_at"] = None
-                current_job["error"] = None
-                current_job["prompt"] = req.prompt # Update prompt context? Or keep history? For now simpler: overwrite
-                save_jobs(_BUILD_JOBS)
-            else:
-                 # fallback if ID invalid
-                 job_id = uuid.uuid4().hex
-                 started_at = datetime.utcnow().isoformat()
-                 run_dir = builder.init_run(req.prompt, job_id=job_id)
-                 _BUILD_JOBS[job_id] = {
-                    "job_id": job_id,
-                    "status": "running",
-                    "prompt": req.prompt,
-                    "started_at": started_at,
-                    "finished_at": None,
-                    "run_dir": run_dir,
-                    "summary": None,
-                    "error": None
-                }
-                 save_jobs(_BUILD_JOBS)
-    else:
-        # New Run
-        job_id = uuid.uuid4().hex
-        started_at = datetime.utcnow().isoformat()
-        run_dir = builder.init_run(req.prompt, job_id=job_id)
-        
-        with _LOCK:
-            _BUILD_JOBS[job_id] = {
+    job_id = req.job_id
+    
+    with _LOCK:
+        current_job = _BUILD_JOBS.get(job_id)
+        if not current_job:
+            # If not in memory, try to load from disk or valid run_dir if we had logic for that.
+            # For now, strict: must exist. But we just created it in /sessions/new so it should exist.
+            # Handle restart case where _BUILD_JOBS is empty: we rely on load_jobs() at startup.
+            # If really missing, fail or recreate. Recreating is safer for user but weird.
+            # Let's recreate if missing to be robust against restarts.
+             _BUILD_JOBS[job_id] = {
                 "job_id": job_id,
-                "status": "running",
-                "prompt": req.prompt,
-                "started_at": started_at,
+                "status": "idle",
+                "prompt": req.prompt or "Restored",
+                "started_at": datetime.utcnow().isoformat(),
                 "finished_at": None,
-                "run_dir": run_dir,
+                "run_dir": builder.init_run(req.prompt or "Restored", job_id=job_id),
                 "summary": None,
                 "error": None
             }
-            save_jobs(_BUILD_JOBS)
+             save_jobs(_BUILD_JOBS)
+             current_job = _BUILD_JOBS[job_id]
+
+        run_dir = current_job.get("run_dir")
+        
+        # PERSIST CHAT
+        if req.prompt:
+            chat_path = os.path.join(run_dir, "chat.json")
+            chat_log = []
+            if os.path.exists(chat_path):
+                try: 
+                    with open(chat_path, "r") as f: chat_log = json.load(f)
+                except: pass
+            
+            chat_log.append({"role": "user", "content": req.prompt, "timestamp": datetime.utcnow().isoformat()})
+            # We don't have the "agent" message yet, that comes from execution events.
+            # frontend poll will pick up status updates.
+            
+            with open(chat_path, "w") as f:
+                json.dump(chat_log, f, indent=2)
+
+        # Update Job Status to Running
+        current_job["status"] = "running"
+        current_job["finished_at"] = None
+        current_job["error"] = None
+        if req.prompt:
+            current_job["prompt"] = req.prompt # Update context
+        save_jobs(_BUILD_JOBS)
 
     # 3. Start Background Build
     def _run_build(job_id: str, run_dir: str, prompt: str):
         try:
-            # Execute actual build in the created dir
-            result = builder.run_build(run_dir, prompt)
+            # Execute actual build
+            prompt_to_use = prompt or "Continue build"
+            result = builder.run_build(run_dir, prompt_to_use)
             
             with _LOCK:
                 if job_id in _BUILD_JOBS:
@@ -278,11 +386,10 @@ def sdlc_build(req: BuildRequest):
     t = threading.Thread(target=_run_build, args=(job_id, run_dir, req.prompt), daemon=True)
     t.start()
 
-    # 4. Return IMMEDIATE Response with Run Dir
     return {
         "job_id": job_id,
         "status": "running",
-        "started_at": started_at,
+        "started_at": current_job["started_at"],
         "run_dir": run_dir
     }
 
@@ -296,41 +403,57 @@ def list_runs():
 
 @app.get("/sdlc/status")
 def sdlc_status(job_id: Optional[str] = None):
-    # Reload jobs for safety
-    current_jobs = load_jobs()
+    global _BUILD_JOBS
     
     if job_id:
-        job = current_jobs.get(job_id)
+        # 1. Check Memory
+        job = _BUILD_JOBS.get(job_id)
+        
+        # 2. If missing, FORCE DISK RESCAN (Self-Healing)
         if not job:
-            return {
+            print(f"Job {job_id} missing from memory, scanning disk...")
+            _BUILD_JOBS = rebuild_jobs_from_disk()
+            job = _BUILD_JOBS.get(job_id)
+
+        if not job:
+             return {
                 "job_id": job_id,
                 "status": "not_found",
-                "error": "Job not found",
-                "started_at": None,
-                "finished_at": None,
+                "error": "Job not found on disk", 
                 "run_dir": None
             }
             
-        # Enrich with live status from status.json if running/completed
-        run_dir = job.get("run_dir")
-        if run_dir:
+        # 3. Always refresh from status.json to get latest BUILDER updates
+        # The builder runs in a thread and writes to disk. Memory might be stale.
+        if job.get("run_dir"):
             try:
-                p = os.path.join(run_dir, "status.json")
+                p = os.path.join(job["run_dir"], "status.json")
                 if os.path.exists(p):
                     with open(p, "r") as f:
                         live_status = json.load(f)
-                        # Merge vital fields for UI
-                        job["current_stage"] = live_status.get("current_stage")
-                        job["provider_used"] = live_status.get("provider_used")
-                        job["status_message"] = live_status.get("status_message")
-                        job["execution_log"] = live_status.get("execution_log", [])
+                        _BUILD_JOBS[job_id].update(live_status) # Sync memory
+                        job = _BUILD_JOBS[job_id]
             except:
                 pass
                 
+        # 4. LOAD CHAT HISTORY
+        run_dir = job.get("run_dir")
+        if run_dir:
+            chat_path = os.path.join(run_dir, "chat.json")
+            if os.path.exists(chat_path):
+                try:
+                    with open(chat_path, "r") as f:
+                        job["messages"] = json.load(f)
+                except:
+                    job["messages"] = []
+            else:
+                job["messages"] = []
+
         return job
         
-    # List all
-    return {"jobs": list(current_jobs.values())}
+    # List all (Force Refresh)
+    _BUILD_JOBS = rebuild_jobs_from_disk()
+    return {"jobs": list(_BUILD_JOBS.values())}
 
 @app.get("/providers")
 def get_providers():

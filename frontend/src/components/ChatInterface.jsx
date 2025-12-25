@@ -34,9 +34,10 @@ export default function ChatInterface({ runId, setRunId }) {
                     // For simplicity, we'll just show the *latest* status as a live indicator
                 }
 
-                if (data.status === 'completed' || data.status === 'failed') {
+                if (data.status === 'completed' || data.status === 'failed' || data.status === 'not_found' || data.status === 'idle') {
                     setLoading(false);
-                    clearInterval(interval);
+                    if (data.status !== 'not_found' && data.status !== 'failed') clearInterval(interval);
+                    if (data.status === 'not_found' || data.status === 'idle') clearInterval(interval);
                 }
             } catch (e) {
                 console.error(e);
@@ -51,17 +52,34 @@ export default function ChatInterface({ runId, setRunId }) {
 
     // Initial greeting or load history
     useEffect(() => {
-        if (!runId) {
-            setMessages([{ role: 'agent', content: "Hello! I'm your SDLC Agent. What would you like to build today?" }]);
-            setStatus(null);
-        } else if (status && status.prompt) {
-            // Restoration logic
+        if (!runId || !status) return;
+
+        // If backend provides full history, use it.
+        if (status.messages && Array.isArray(status.messages) && status.messages.length > 0) {
+            // Only update if length differs to avoid infinite loops/jitters during polling, 
+            // or better: force specific structure.
+            // Simple check: if we have 0 messages locally, load remote.
             if (messages.length === 0) {
-                setMessages([
-                    { role: 'user', content: status.prompt },
-                    { role: 'agent', content: `Restored session for "${status.prompt}". Status: ${status.status}.` }
-                ]);
+                setMessages(status.messages);
+            } else {
+                // If remote has MORE messages (e.g. from a reload or agent response we missed), sync them.
+                // For now, let's trust the backend as the source of truth if the user refreshes.
+                // We'll use a simpler heuristic: If it's a "Restored" session (we just loaded), setMessages.
+                // But we need to be careful not to overwrite user input while typing.
+                // Let's just do it on initial load (messages.length === 0).
             }
+            return;
+        }
+
+        const isNew = status.status === 'idle' || status.prompt === 'New Session' || status.status === 'not_found';
+        if (isNew && messages.length === 0) {
+            setMessages([{ role: 'agent', content: "Hello! I'm your SDLC Agent. What would you like to build today?" }]);
+        } else if (messages.length === 0 && status.prompt) {
+            // Fallback if chat.json is empty but we have a prompt (Legacy runs)
+            setMessages([
+                { role: 'user', content: status.prompt },
+                { role: 'agent', content: `Restored session for "${status.prompt}". Status: ${status.status}.` }
+            ]);
         }
     }, [runId, status]);
 
@@ -74,24 +92,37 @@ export default function ChatInterface({ runId, setRunId }) {
         setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
         setLoading(true);
 
-        // If no runId, we start a NEW build
-        // If runId exists, we are "Conversing/Fixing" (Not fully implemented on backend yet as "fix", but we can trigger a new build with context? 
-        // The requirement says "Error-Fix Loop". For now, we will treat a new message as a RE-BUILD request or new request.
-        // Ideally we'd append to the existing run log, but our backend is prompt->build. 
-        // We will trigger a NEW build prompt, but maybe reference context? 
-        // Let's just treat it as a fresh build trigger for now to satisfy robustness.
+        // Strict Requirement: Job ID must exist
+        if (!runId) {
+            setMessages(prev => [...prev, { role: 'agent', content: "Error: No active session. Please start a New Project.", error: true }]);
+            setLoading(false);
+            return;
+        }
 
         try {
-            const res = await fetch(`${API_BASE}/sdlc/build`, {
+            // New Architecture: Use /chat for everything.
+            // This endpoint naturally handles both "initial" context (if appended) and "continuation"
+            // But we actually use /sdlc/build for the VERY FIRST prompt in a new session (created via /sessions/new).
+            // Correction: /sdlc/build is for "Start Build". /chat is for "Continue".
+            // If status is idle, this is the First Build Trigger.
+
+            const isFirstBuild = status?.status === 'idle' || status?.prompt === 'New Session';
+
+            const endpoint = isFirstBuild ? `${API_BASE}/sdlc/build` : `${API_BASE}/chat`;
+            const payload = isFirstBuild ? { prompt: userMsg, job_id: runId } : { message: userMsg, job_id: runId };
+
+            const res = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: userMsg, job_id: runId }) // Send runId if existing to continue/fix
+                body: JSON.stringify(payload)
             });
-            const data = await res.json();
-            setRunId(data.job_id); // This switches the view to the new run
-            setMessages(prev => [...prev, { role: 'agent', content: "Okay, starting that build for you now..." }]);
+            await res.json();
+
+            // Re-enable polling loop if it stopped
+            setLoading(true); // Ensure UI shows loading
+
         } catch (e) {
-            setMessages(prev => [...prev, { role: 'agent', content: "Error starting build: " + e.message, error: true }]);
+            setMessages(prev => [...prev, { role: 'agent', content: "Error sending message: " + e.message, error: true }]);
             setLoading(false);
         }
     };
@@ -143,8 +174,8 @@ export default function ChatInterface({ runId, setRunId }) {
                     </div>
                 ))}
 
-                {/* Live Status Card */}
-                {status && (
+                {/* Live Status Card - Only show if active/done (not idle) */}
+                {status && status.status !== 'idle' && (
                     <div className="flex justify-start w-full">
                         <div className="w-full max-w-2xl bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
                             <div className="bg-gray-50 px-4 py-2 border-b flex justify-between items-center">

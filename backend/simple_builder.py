@@ -27,7 +27,9 @@ class SimpleBuilder:
         # Immediate status.json
         status = {
             "job_id": job_id or os.path.basename(run_dir),
-            "status": "running",
+            "job_id": job_id or os.path.basename(run_dir),
+            "status": "idle",
+            "started_at": datetime.utcnow().isoformat(),
             "started_at": datetime.utcnow().isoformat(),
             "prompt": prompt,
             "backend": {},
@@ -114,13 +116,38 @@ class SimpleBuilder:
             return ["claude", "openai", "mistral", "deepseek", "gemini", "groq", "hf"]
         return ["openai", "gemini", "mistral", "groq", "hf", "ollama"]
 
+    def _safe_generate(self, prompt: str, providers: List[str], lang: str) -> str:
+        """
+        Tries providers in order until one succeeds.
+        Returns cleaned code or distinct error marker.
+        """
+        for p in providers:
+            try:
+                # self.router.generate_text handles the logic, but we need to force preferences here if we want explicit fallback chain
+                # The router already supports a list of preference!
+                # So we just pass the list. But if we want to log *which* one worked, we might need manual iteration or trust router.
+                # Router's generate_text with preference=list tries them in order.
+                res = self.router.generate_text(prompt, preference=[p]) # Force one at a time for granular error tracking logic here if needed
+                
+                # Verify output quality check
+                code = self._clean_code(res.get("output", ""), lang=lang)
+                if not code or len(code) < 20: 
+                     continue # Try next
+                     
+                return code, p # Success
+            except:
+                continue
+        return None, None
+
     def _build_ai_intelligent(self, run_dir: str, prompt: str, status_cb) -> Dict[str, Any]:
         slug = os.path.basename(run_dir)
+        success_backend = False
+        success_frontend = False
         
         # --- BACKEND ---
         try:
-            backend_pref = self._select_provider("backend_code")
-            status_cb("backend_generation", str(backend_pref), "Generating FastAPI Backend...")
+            backend_prefs = self._select_provider("backend_code")
+            status_cb("backend_generation", "auto", "Generating FastAPI Backend...")
             
             backend_prompt = (
                 f"Generate a single-file FastAPI backend (main.py) for: {prompt}. "
@@ -128,10 +155,24 @@ class SimpleBuilder:
                 "Use Pydantic models. Return ONLY the python code."
             )
             
-            be_res = self.router.generate_text(backend_prompt, preference=backend_pref)
-            be_code = self._clean_code(be_res.get("output", ""))
+            # Manual Fallback Loop for Granular Status Updates
+            be_code = None
+            used_provider = "none"
             
-            if "FastAPI" not in be_code:
+            for provider in backend_prefs:
+                 status_cb("backend_generation", provider, f"Attempting generation with {provider}...")
+                 try:
+                     res = self.router.generate_text(backend_prompt, preference=[provider])
+                     candidate = self._clean_code(res.get("output", ""), lang="python")
+                     if "FastAPI" in candidate:
+                         be_code = candidate
+                         used_provider = provider
+                         break
+                 except Exception as e:
+                     print(f"Provider {provider} failed: {e}")
+                     continue
+
+            if not be_code:
                  # Fallback if AI produced garbage
                  be_code = f"""from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -142,19 +183,21 @@ def root(): return {{"message": "AI generation failed, fallback active for: {pro
 @app.get("/health")
 def health(): return {{"status": "ok"}}
 """
-                 status_cb("backend_generation", "system", "AI failed, used fallback backend")
+                 status_cb("backend_generation", "system", "All AI providers failed, using fallback backend.")
+            else:
+                 success_backend = True
+                 status_cb("backend_generation", used_provider, "Backend generated successfully.")
 
             self._write_file(run_dir, "backend/main.py", be_code)
             self._write_file(run_dir, "backend/requirements.txt", "fastapi\nuvicorn\npydantic\npython-multipart\n")
         except Exception as e:
             status_cb("backend_error", "system", f"Backend generation crashed: {e}")
-            # Ensure file exists even on crash
             self._write_file(run_dir, "backend/main.py", """from fastapi import FastAPI\napp = FastAPI()\n""")
 
         # --- FRONTEND ---
         try:
-            frontend_pref = self._select_provider("frontend_code")
-            status_cb("frontend_generation", str(frontend_pref), "Generating React Frontend...")
+            frontend_prefs = self._select_provider("frontend_code")
+            status_cb("frontend_generation", "auto", "Generating React Frontend...")
             
             fe_prompt = (
                 f"Generate a React component (App.jsx) for: {prompt}. "
@@ -162,23 +205,47 @@ def health(): return {{"status": "ok"}}
                 "Use fetch() to call the endpoints you would expect for this app. "
                 "Use Tailwind CSS classes for styling. Return ONLY the jsx code."
             )
-            fe_res = self.router.generate_text(fe_prompt, preference=frontend_pref)
-            fe_code = self._clean_code(fe_res.get("output", ""), lang="jsx")
+            
+            fe_code = None
+            used_fe_provider = "none"
 
-            if "export default" not in fe_code and "function" not in fe_code:
+            for provider in frontend_prefs:
+                 status_cb("frontend_generation", provider, f"Attempting generation with {provider}...")
+                 try:
+                     res = self.router.generate_text(fe_prompt, preference=[provider])
+                     candidate = self._clean_code(res.get("output", ""), lang="jsx")
+                     if "export default" in candidate or "function" in candidate:
+                         fe_code = candidate
+                         used_fe_provider = provider
+                         break
+                 except:
+                     continue
+
+            if not fe_code:
                  fe_code = self._get_hello_frontend()
                  status_cb("frontend_generation", "system", "AI failed, used fallback frontend")
+            else:
+                 success_frontend = True
+                 status_cb("frontend_generation", used_fe_provider, "Frontend generated successfully.")
 
             self._write_frontend_scaffold(run_dir, fe_code)
         except Exception as e:
              status_cb("frontend_error", "system", f"Frontend generation crashed: {e}")
-             # Ensure fallback exists
              self._write_frontend_scaffold(run_dir, self._get_hello_frontend())
         
         status_cb("finalizing", "system", "Writing artifacts...")
         self._write_common_artifacts(run_dir, prompt, f"AI Generated: {slug}")
         
-        return {"summary": f"AI Build Completed for {slug}", "run_dir": run_dir}
+        # PARTIAL SUCCESS LOGIC
+        final_summary = f"AI Build Completed for {slug}"
+        if success_backend and success_frontend:
+             final_summary += " (Full Success)"
+        elif success_backend or success_frontend:
+             final_summary += " (Partial Success)"
+        else:
+             final_summary += " (Fallback Mode)"
+             
+        return {"summary": final_summary, "run_dir": run_dir, "partial": not (success_backend and success_frontend)}
 
     # ... (rest of methods: _clean_code, _write_frontend_scaffold, _write_common_artifacts, _get_, etc. keep existing)
 

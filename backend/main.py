@@ -164,12 +164,12 @@ def health():
 # -------------------------------------------------
 # SDLC BUILD (REAL DETERMINISTIC)
 # -------------------------------------------------
-from .simple_builder import SimpleBuilder
+from simple_builder import SDLCBuilder
 
 
 JOBS_FILE = "jobs.json"
 _LOCK = threading.Lock()
-builder = SimpleBuilder(runs_dir="runs")
+builder = SDLCBuilder(runs_dir="runs")
 
 def rebuild_jobs_from_disk() -> Dict[str, Dict[str, Any]]:
     """SCANS runs/ directory and rebuilds memory state from status.json files."""
@@ -190,6 +190,16 @@ def rebuild_jobs_from_disk() -> Dict[str, Dict[str, Any]]:
                     
                     # Ensure path is absolute/correct
                     job_data["run_dir"] = run_dir
+
+                    # SELF-HEALING: If job was 'running' when server died, mark it failed so UI unlocks.
+                    if job_data.get("status") == "running":
+                        job_data["status"] = "failed"
+                        job_data["error"] = "Process interrupted (Server Restart)"
+                        # Optionally write back to disk to sync state
+                        try:
+                            with open(status_path, "w") as fw:
+                                json.dump(job_data, fw, indent=2)
+                        except: pass
                     
                     jobs[job_data["job_id"]] = job_data
             except Exception as e:
@@ -226,6 +236,14 @@ def new_session():
             "started_at": started_at,
             "finished_at": None,
             "run_dir": run_dir,
+            "phases": {
+                "planning": "waiting",
+                "design": "waiting",
+                "backend": "waiting",
+                "frontend": "waiting",
+                "tests": "waiting",
+                "deployment": "waiting"
+            },
             "summary": None,
             "error": None
         }
@@ -360,9 +378,13 @@ def sdlc_build(req: BuildRequest):
             with _LOCK:
                 if job_id in _BUILD_JOBS:
                     job = _BUILD_JOBS[job_id]
-                    job["status"] = "completed"
+                    # Update status based on result
+                    final_status = result.get("status", "completed")
+                    job["status"] = final_status
                     job["finished_at"] = datetime.utcnow().isoformat()
                     job["summary"] = result.get("summary")
+                    if final_status == "failed":
+                        job["error"] = result.get("error")
                     save_jobs(_BUILD_JOBS)
                 
         except Exception as e:
@@ -435,6 +457,41 @@ def sdlc_status(job_id: Optional[str] = None):
                         job = _BUILD_JOBS[job_id]
             except:
                 pass
+
+            try:
+                # Load flowchart
+                fc_path = os.path.join(job["run_dir"], "design", "flowchart.mmd")
+                if not os.path.exists(fc_path):
+                     # Fallback for old runs
+                     fc_path = os.path.join(job["run_dir"], "flowchart.mmd")
+                
+                if os.path.exists(fc_path):
+                    with open(fc_path, "r", encoding="utf-8") as f:
+                        job["flowchart"] = f.read()
+            except:
+                pass
+                
+            try:
+                # Load providers history
+                prov_path = os.path.join(job["run_dir"], "providers_used.json")
+                if os.path.exists(prov_path):
+                     with open(prov_path, "r") as f:
+                         job["providers_history"] = json.load(f).get("history", [])
+            except:
+                pass
+
+            try:
+                # Load test report
+                test_path = os.path.join(job["run_dir"], "tests", "test_report.json")
+                if not os.path.exists(test_path):
+                     # Fallback
+                     test_path = os.path.join(job["run_dir"], "test_report.json")
+
+                if os.path.exists(test_path):
+                     with open(test_path, "r") as f:
+                         job["test_report"] = json.load(f)
+            except:
+                pass
                 
         # 4. LOAD CHAT HISTORY
         run_dir = job.get("run_dir")
@@ -449,7 +506,16 @@ def sdlc_status(job_id: Optional[str] = None):
             else:
                 job["messages"] = []
 
-        return job
+        return {
+            "run_id": job.get("job_id"),
+            "status": job.get("status"),
+            "current_phase": job.get("current_phase", "planning"),
+            "phases": job.get("phases", {}),
+            "messages": job.get("messages", []),
+            "flowchart": job.get("flowchart"),
+            "providers_history": job.get("providers_history", []),
+            "test_report": job.get("test_report")
+        }
         
     # List all (Force Refresh)
     _BUILD_JOBS = rebuild_jobs_from_disk()

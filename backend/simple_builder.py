@@ -1,480 +1,382 @@
 import os
 import json
-import threading
+import time
+import subprocess
+import traceback
+from typing import Dict, Any, List, Optional
 from datetime import datetime
-from typing import Dict, Any, List
 
-from .services.adapters import InferenceRouter
+from services.adapters import InferenceRouter
 
-class SimpleBuilder:
+class SDLCBuilder:
+    """
+    The Autonomous SDLC Orchestrator (Upgraded).
+    Executes a strict 6-phase pipeline with state persistence and resumability.
+    
+    Phases:
+    1. Planning: Requirements Analysis -> requirements.md
+    2. Design: System Architecture -> design.json, architecture.md, flowchart.mmd
+    3. Backend: Code Generation -> FastAPI/Node
+    4. Frontend: Code Generation -> React/Vite
+    5. Testing: Real execution -> pytest, test_report.json
+    6. Deployment: Configuration -> Dockerfile, deployment.md
+    """
+
     def __init__(self, runs_dir: str = "runs"):
         self.runs_dir = runs_dir
         self.router = InferenceRouter()
         os.makedirs(self.runs_dir, exist_ok=True)
 
-    def build(self, prompt: str) -> Dict[str, Any]:
-        """Legacy wrapper for backward protection if needed, though we will use new methods."""
-        run_dir = self.init_run(prompt)
-        return self.run_build(run_dir, prompt)
-
-    def init_run(self, prompt: str, job_id: str = None) -> str:
-        """Creates run directory and initial status.json immediately."""
-        slug = "".join(c for c in prompt.lower() if c.isalnum() or c == " ").strip().replace(" ", "-")[:30]
-        if not slug:
-            slug = "project"
-        run_dir = self._create_run_dir(slug)
-        
-        # Immediate status.json
-        status = {
-            "job_id": job_id or os.path.basename(run_dir),
-            "job_id": job_id or os.path.basename(run_dir),
-            "status": "idle",
-            "started_at": datetime.utcnow().isoformat(),
-            "started_at": datetime.utcnow().isoformat(),
-            "prompt": prompt,
-            "backend": {},
-            "frontend": {}
-        }
-        self._write_file(run_dir, "status.json", json.dumps(status, indent=2))
-        return run_dir
-
-    # ... (imports remain)
-
-    def run_build(self, run_dir: str, prompt: str) -> Dict[str, Any]:
-        """
-        Hybrid build execution in the specific run_dir with Intelligent Routing.
-        """
-        self.router.refresh()
-        prompt_lower = prompt.lower()
-        
-        # Track execution details
-        execution_log = []
-        
-        def update_status(stage: str, provider: str = "system", status_msg: str = "running"):
-            try:
-                p = os.path.join(run_dir, "status.json")
-                if os.path.exists(p):
-                    with open(p, "r") as f: current = json.load(f)
-                else:
-                    current = {}
-                
-                current.update({
-                    "current_stage": stage,
-                    "provider_used": provider,
-                    "status_message": status_msg,
-                    "last_updated": datetime.utcnow().isoformat()
-                })
-                self._write_file(run_dir, "status.json", json.dumps(current, indent=2))
-                execution_log.append({"stage": stage, "provider": provider, "msg": status_msg, "time": datetime.utcnow().isoformat()})
-            except:
-                pass
-
-        result = {}
-        
-        # 1. Deterministic Shortcuts
-        if "counter" in prompt_lower:
-            update_status("planning", "system", "Dedicated template found: Counter App")
-            result = self._build_counter(run_dir, prompt)
-            update_status("completed", "system", "Build finished")
-        elif "hello" in prompt_lower:
-            update_status("planning", "system", "Dedicated template found: Hello World")
-            result = self._build_hello(run_dir, prompt)
-            update_status("completed", "system", "Build finished")
-        else:
-            # 2. AI Path
-            update_status("planning", "system", "Analyzing requirements...")
-            
-            # Check AI or just try fallback robustly
-            # We will try AI route, but if it fails, _build_ai_intelligent now handles fallback internally per stage
-            update_status("generation", "auto", "Starting AI Generation...")
-            result = self._build_ai_intelligent(run_dir, prompt, update_status)
-
-        # Update status.json to completed
-        try:
-            status_path = os.path.join(run_dir, "status.json")
-            with open(status_path, "r") as f:
-                current_status = json.load(f)
-            
-            current_status.update({
-                "status": "completed",
-                "finished_at": datetime.utcnow().isoformat(),
-                "success": True,
-                "summary": result.get("summary"),
-                "execution_log": execution_log
-            })
-            self._write_file(run_dir, "status.json", json.dumps(current_status, indent=2))
-        except Exception:
-            pass
-            
-        return result
-
-    def _select_provider(self, stage: str) -> List[str]:
-        """Intelligent Routing: Select best provider preferences based on stage."""
-        if stage == "planning":
-            return ["openai", "gemini", "anthropic", "mistral"]
-        elif stage == "backend_code" or stage == "frontend_code":
-            return ["claude", "openai", "mistral", "deepseek", "gemini", "groq", "hf"]
-        return ["openai", "gemini", "mistral", "groq", "hf", "ollama"]
-
-    def _safe_generate(self, prompt: str, providers: List[str], lang: str) -> str:
-        """
-        Tries providers in order until one succeeds.
-        Returns cleaned code or distinct error marker.
-        """
-        for p in providers:
-            try:
-                # self.router.generate_text handles the logic, but we need to force preferences here if we want explicit fallback chain
-                # The router already supports a list of preference!
-                # So we just pass the list. But if we want to log *which* one worked, we might need manual iteration or trust router.
-                # Router's generate_text with preference=list tries them in order.
-                res = self.router.generate_text(prompt, preference=[p]) # Force one at a time for granular error tracking logic here if needed
-                
-                # Verify output quality check
-                code = self._clean_code(res.get("output", ""), lang=lang)
-                if not code or len(code) < 20: 
-                     continue # Try next
-                     
-                return code, p # Success
-            except:
-                continue
-        return None, None
-
-    def _build_ai_intelligent(self, run_dir: str, prompt: str, status_cb) -> Dict[str, Any]:
-        slug = os.path.basename(run_dir)
-        success_backend = False
-        success_frontend = False
-        
-        # --- BACKEND ---
-        try:
-            backend_prefs = self._select_provider("backend_code")
-            status_cb("backend_generation", "auto", "Generating FastAPI Backend...")
-            
-            backend_prompt = (
-                f"Generate a single-file FastAPI backend (main.py) for: {prompt}. "
-                "Include ALL imports, a /health endpoint, and CORS middleware allowing '*'. "
-                "Use Pydantic models. Return ONLY the python code."
-            )
-            
-            # Manual Fallback Loop for Granular Status Updates
-            be_code = None
-            used_provider = "none"
-            
-            for provider in backend_prefs:
-                 status_cb("backend_generation", provider, f"Attempting generation with {provider}...")
-                 try:
-                     res = self.router.generate_text(backend_prompt, preference=[provider])
-                     candidate = self._clean_code(res.get("output", ""), lang="python")
-                     if "FastAPI" in candidate:
-                         be_code = candidate
-                         used_provider = provider
-                         break
-                 except Exception as e:
-                     print(f"Provider {provider} failed: {e}")
-                     continue
-
-            if not be_code:
-                 # Fallback if AI produced garbage
-                 be_code = f"""from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-@app.get("/")
-def root(): return {{"message": "AI generation failed, fallback active for: {prompt}"}}
-@app.get("/health")
-def health(): return {{"status": "ok"}}
-"""
-                 status_cb("backend_generation", "system", "All AI providers failed, using fallback backend.")
-            else:
-                 success_backend = True
-                 status_cb("backend_generation", used_provider, "Backend generated successfully.")
-
-            self._write_file(run_dir, "backend/main.py", be_code)
-            self._write_file(run_dir, "backend/requirements.txt", "fastapi\nuvicorn\npydantic\npython-multipart\n")
-        except Exception as e:
-            status_cb("backend_error", "system", f"Backend generation crashed: {e}")
-            self._write_file(run_dir, "backend/main.py", """from fastapi import FastAPI\napp = FastAPI()\n""")
-
-        # --- FRONTEND ---
-        try:
-            frontend_prefs = self._select_provider("frontend_code")
-            status_cb("frontend_generation", "auto", "Generating React Frontend...")
-            
-            fe_prompt = (
-                f"Generate a React component (App.jsx) for: {prompt}. "
-                "Assume the backend is at VITE_API_BASE. "
-                "Use fetch() to call the endpoints you would expect for this app. "
-                "Use Tailwind CSS classes for styling. Return ONLY the jsx code."
-            )
-            
-            fe_code = None
-            used_fe_provider = "none"
-
-            for provider in frontend_prefs:
-                 status_cb("frontend_generation", provider, f"Attempting generation with {provider}...")
-                 try:
-                     res = self.router.generate_text(fe_prompt, preference=[provider])
-                     candidate = self._clean_code(res.get("output", ""), lang="jsx")
-                     if "export default" in candidate or "function" in candidate:
-                         fe_code = candidate
-                         used_fe_provider = provider
-                         break
-                 except:
-                     continue
-
-            if not fe_code:
-                 fe_code = self._get_hello_frontend()
-                 status_cb("frontend_generation", "system", "AI failed, used fallback frontend")
-            else:
-                 success_frontend = True
-                 status_cb("frontend_generation", used_fe_provider, "Frontend generated successfully.")
-
-            self._write_frontend_scaffold(run_dir, fe_code)
-        except Exception as e:
-             status_cb("frontend_error", "system", f"Frontend generation crashed: {e}")
-             self._write_frontend_scaffold(run_dir, self._get_hello_frontend())
-        
-        status_cb("finalizing", "system", "Writing artifacts...")
-        self._write_common_artifacts(run_dir, prompt, f"AI Generated: {slug}")
-        
-        # PARTIAL SUCCESS LOGIC
-        final_summary = f"AI Build Completed for {slug}"
-        if success_backend and success_frontend:
-             final_summary += " (Full Success)"
-        elif success_backend or success_frontend:
-             final_summary += " (Partial Success)"
-        else:
-             final_summary += " (Fallback Mode)"
-             
-        return {"summary": final_summary, "run_dir": run_dir, "partial": not (success_backend and success_frontend)}
-
-    # ... (rest of methods: _clean_code, _write_frontend_scaffold, _write_common_artifacts, _get_, etc. keep existing)
-
-    def _create_run_dir(self, slug: str) -> str:
-        timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        run_dir_name = f"{timestamp}-{slug}"
-        run_dir = os.path.join(self.runs_dir, run_dir_name)
+    def init_run(self, prompt: str, job_id: Optional[str] = None) -> str:
+        if not job_id:
+            import uuid
+            job_id = uuid.uuid4().hex
+        run_dir = os.path.join(self.runs_dir, job_id)
         os.makedirs(run_dir, exist_ok=True)
         return run_dir
 
-    def _write_file(self, run_dir: str, rel_path: str, content: str):
-        full_path = os.path.join(run_dir, rel_path)
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, "w", encoding="utf-8") as f:
+    def run_build(self, run_dir: str, prompt: str) -> Dict[str, Any]:
+        """
+        Main entry point. Resumes from the last successful state.
+        """
+        job_id = os.path.basename(run_dir)
+        status = self._load_status(run_dir)
+        
+        # PERSIST PROMPT for Session Names
+        if prompt and prompt.strip():
+            status["prompt"] = prompt
+            self._save_json(run_dir, "status.json", status)
+        
+        # Define Phase Order
+        phases = ["planning", "design", "backend", "frontend", "tests", "deployment"]
+        
+        # Update prompt if provided
+        self._log_event(run_dir, "system", f"Build triggered: {prompt}")
+
+        for phase in phases:
+            current_phase_status = status.get("phases", {}).get(phase, "waiting")
+            
+            # Skip if already completed
+            if current_phase_status == "completed":
+                continue
+            
+            # Stop if the previous phase failed (unless we are retrying this one)
+            # Actually, the loop naturally proceeds. If we find a 'failed' or 'waiting' phase, we try to run it.
+            # But we must ensure dependencies exist.
+            
+            try:
+                self._update_status(run_dir, job_id, phase, "running", f"Starting {phase} phase...")
+                
+                # Execute Phase
+                if phase == "planning":
+                    self._phase_planning(prompt, run_dir)
+                elif phase == "design":
+                    self._phase_design(run_dir)
+                elif phase == "backend":
+                    self._phase_backend(run_dir)
+                elif phase == "frontend":
+                    self._phase_frontend(run_dir)
+                elif phase == "tests":
+                    self._phase_tests(run_dir)
+                elif phase == "deployment":
+                    self._phase_deployment(run_dir)
+                
+                self._update_status(run_dir, job_id, phase, "completed", f"{phase} completed successfully.")
+                
+                # Refresh status for next loop iteration
+                status = self._load_status(run_dir)
+                
+            except Exception as e:
+                err_msg = f"{phase} failed: {str(e)}"
+                traceback.print_exc()
+                self._update_status(run_dir, job_id, phase, "failed", err_msg)
+                self._log_event(run_dir, "error", traceback.format_exc())
+                return {"status": "failed", "error": err_msg}
+
+        self._update_status(run_dir, job_id, "complete", "completed", "All phases executed successfully.")
+        return {"status": "completed", "summary": "Build successful"}
+
+    # ------------------------------------------------------------------
+    # PHASES
+    # ------------------------------------------------------------------
+
+    def _phase_planning(self, prompt: str, run_dir: str):
+        """Phase 1: Requirements"""
+        sys_prompt = (
+            "You are an expert Software Architect. "
+            "Analyze the following user request and produce a detailed requirement analysis. "
+            "Return a JSON object with: "
+            "'functional_requirements' (list provided as markdown strings), "
+            "'non_functional_requirements' (list), "
+            "'user_roles' (list), "
+            "'tech_stack' (detailed dict), "
+            "'assumptions' (list). "
+            "Also provide a 'markdown_content' field which contains the full nicely formatted content for a requirements.md file."
+        )
+        
+        # User defined: Planning -> OpenAI / Gemini
+        res = self.router.generate_text(f"{sys_prompt}\n\nRequest: {prompt}", preference=["openai", "azure_openai", "gemini"])
+        data = self._extract_json(res.get("output", ""))
+        
+        # Save JSON data
+        self._save_json(run_dir, "planning/planning.json", data)
+        
+        # Save Markdown Artifact
+        md_content = data.get("markdown_content")
+        if not md_content:
+            md_content = f"# Requirements\n\n## Functional\n{json.dumps(data.get('functional_requirements', []), indent=2)}\n"
+            
+        self._save_file(run_dir, "planning/requirements.md", md_content)
+        self._log_usage(run_dir, "planning", res)
+
+    def _phase_design(self, run_dir: str):
+        """Phase 2: System Design"""
+        # Load planning data
+        planning = self._load_json(run_dir, "planning/planning.json")
+        if not planning:
+            raise ValueError("Planning data missing. Cannot proceed to design.")
+
+        sys_prompt = (
+            "You are a System Designer. Based on the requirements, generate a System Design. "
+            "Return a JSON object with keys: "
+            "'architecture_description', 'api_endpoints' (list of {method, path, desc}), "
+            "'database_schema' (text description), "
+            "'component_flow' (text), "
+            "and 'markdown_content' (full content for architecture.md)."
+        )
+        
+        # User defined: Design -> Gemini
+        res = self.router.generate_text(f"{sys_prompt}\n\nRequirements: {json.dumps(planning)}", preference=["gemini", "openai"])
+        data = self._extract_json(res.get("output", ""))
+        self._save_json(run_dir, "design/design.json", data)
+        self._save_file(run_dir, "design/architecture.md", data.get("markdown_content", "# Architecture\n"))
+        self._log_usage(run_dir, "design", res)
+
+        # Generate Flowchart (Mermaid) separately
+        mermaid_prompt = (
+            "Create a Mermaid.js flowchart (graph TD) representing the system architecture and data flow for the following application. "
+            "Return ONLY the mermaid code block."
+        )
+        res_mmd = self.router.generate_text(f"{mermaid_prompt}\n\nContext: {json.dumps(data)}", preference=["gemini", "openai"])
+        mmd_content = self._clean_mermaid(res_mmd.get("output", ""))
+        self._save_file(run_dir, "design/flowchart.mmd", mmd_content)
+
+    def _phase_backend(self, run_dir: str):
+        """Phase 3: Backend Generation"""
+        design = self._load_json(run_dir, "design/design.json")
+        
+        prompt = (
+            "Generate a production-ready FastAPI (Python) backend using the provided design. "
+            "Strictly follow the project structure. "
+            "Return a JSON mapping of filenames to their full string content. "
+            "Include: 'main.py' (FastAPI entrypoint), 'models.py' (Pydantic/SQLAlchemy), 'database.py', 'requirements.txt'. "
+            "Ensure 'main.py' uses absolute imports if needed, or simple local imports. "
+            "Ensure uvicorn start string is standard. "
+            f"Design Context: {json.dumps(design)}"
+        )
+        
+        # User defined: Code -> OpenAI / Mistral
+        res = self.router.generate_code(prompt, preference=["openai", "mistral", "groq"])
+        files = res.get("files", {})
+        if not files:
+            raise ValueError("No backend files generated.")
+            
+        self._write_files(run_dir, files, prefix="backend")
+        self._log_usage(run_dir, "backend", res)
+
+    def _phase_frontend(self, run_dir: str):
+        """Phase 4: Frontend Generation"""
+        design = self._load_json(run_dir, "design/design.json")
+        
+        prompt = (
+            "Generate a complete React + Vite + Tailwind frontend application. "
+            "Return a JSON mapping of filenames to content. "
+            "Files REQUIRED: 'package.json', 'vite.config.js', 'index.html', "
+            "'src/main.jsx', 'src/App.jsx', 'src/index.css', 'src/components/Layout.jsx'. "
+            "Ensure the App components link to the backend at http://localhost:8000. "
+            "Do not truncate codes. "
+            f"Design Context: {json.dumps(design)}"
+        )
+        
+        # User defined: Frontend -> OpenAI
+        res = self.router.generate_code(prompt, preference=["openai", "azure_openai", "gemini"])
+        files = res.get("files", {})
+        if not files:
+            raise ValueError("No frontend files generated.")
+            
+        self._write_files(run_dir, files, prefix="frontend")
+        self._log_usage(run_dir, "frontend", res)
+
+    def _phase_tests(self, run_dir: str):
+        """Phase 5: Test Generation & Execution"""
+        design = self._load_json(run_dir, "design/design.json")
+        
+        # 1. Generate Tests
+        prompt = (
+            "Generate a 'test_main.py' using pytest and TestClient for the FastAPI backend. "
+            "Cover the endpoints defined in the design."
+        )
+        # User defined: Tests -> Groq / OpenAI
+        res = self.router.generate_code(prompt, preference=["groq", "openai"])
+        files = res.get("files", {})
+        self._write_files(run_dir, files, prefix="backend/tests") 
+        self._log_usage(run_dir, "tests_gen", res)
+        
+        # 2. Execute Tests
+        backend_dir = os.path.join(run_dir, "backend")
+        
+        report = {"passed": 0, "failed": 0, "log": ""}
+        try:
+            cmd = ["pytest", "tests", "--disable-warnings", "-v"]
+            
+            proc = subprocess.run(
+                cmd, 
+                cwd=backend_dir, 
+                capture_output=True, 
+                text=True,
+                timeout=45
+            )
+            
+            report["log"] = proc.stdout + "\n" + proc.stderr
+            report["return_code"] = proc.returncode
+            report["passed"] = int(report["log"].count("PASSED"))
+            report["failed"] = int(report["log"].count("FAILED"))
+            
+            if proc.returncode != 0 and report["failed"] == 0:
+                 report["error"] = "Test execution failed (syntax or env error)."
+        
+        except Exception as e:
+            report["error"] = str(e)
+            
+        self._save_json(run_dir, "tests/test_report.json", report)
+        # Also save to run root for easier access if needed, but primary is in tests/
+        self._save_json(run_dir, "run_report.json", report)
+
+    def _phase_deployment(self, run_dir: str):
+        """Phase 6: Deployment Artifacts"""
+        prompt = "Generate 'Dockerfile' for a FastAPI app and a 'docker-compose.yml' that serves backend and a generic frontend service."
+        res = self.router.generate_code(prompt, preference=["openai", "mistral"])
+        files = res.get("files", {})
+        self._write_files(run_dir, files, prefix="deployment")
+        self._save_file(run_dir, "deployment/deployment.md", "# Deployment Guide\n\nRun `docker-compose up --build`.")
+        self._log_usage(run_dir, "deployment", res)
+
+    # ------------------------------------------------------------------
+    # HELPERS
+    # ------------------------------------------------------------------
+
+    def _load_status(self, run_dir: str) -> Dict[str, Any]:
+        path = os.path.join(run_dir, "status.json")
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f: return json.load(f)
+            except: pass
+        return {}
+
+    def _update_status(self, run_dir: str, job_id: str, phase: str, status: str, msg: str):
+        path = os.path.join(run_dir, "status.json")
+        data = self._load_status(run_dir)
+        
+        data["job_id"] = job_id
+        data["last_updated"] = datetime.now().isoformat()
+        if phase != "complete":
+            data["current_phase"] = phase
+        
+        if "phases" not in data:
+            data["phases"] = {}
+        data["phases"][phase] = status
+        
+        data["message"] = msg
+        
+        if "execution_log" not in data:
+            data["execution_log"] = []
+        data["execution_log"].append({
+            "time": datetime.now().isoformat(),
+            "phase": phase,
+            "status": status,
+            "message": msg
+        })
+        
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def _log_event(self, run_dir, category, content):
+        # A simple append-only log specific to the build
+        pass # covered by status.json execution_log mostly
+
+    def _log_usage(self, run_dir: str, phase: str, res: Dict):
+        path = os.path.join(run_dir, "providers_used.json")
+        history = []
+        if os.path.exists(path):
+            try: 
+                with open(path, "r") as f: history = json.load(f).get("history", [])
+            except: pass
+        
+        history.append({
+            "phase": phase,
+            "provider": res.get("provider", "unknown"),
+            "model": res.get("model", "unknown"),
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        with open(path, "w") as f:
+            json.dump({"history": history}, f, indent=2)
+
+    def _save_json(self, run_dir: str, filename: str, data: Any):
+        path = os.path.join(run_dir, filename)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def _load_json(self, run_dir: str, filename: str) -> Optional[Dict]:
+        path = os.path.join(run_dir, filename)
+        if os.path.exists(path):
+            with open(path, "r") as f: return json.load(f)
+        return None
+
+    def _save_file(self, run_dir: str, filename: str, content: str):
+        path = os.path.join(run_dir, filename)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
-    def _build_counter(self, run_dir: str, prompt: str) -> Dict[str, Any]:
-        # Reuse existing logic... 
-        backend_main = """from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+    def _write_files(self, run_dir: str, files: Dict[str, str], prefix: str = ""):
+        for rel_path, content in files.items():
+            clean_path = rel_path
+            if prefix and not clean_path.startswith(prefix):
+                clean_path = os.path.join(prefix, clean_path)
+            full_path = os.path.join(run_dir, clean_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
 
-app = FastAPI()
+    def _extract_json(self, text: str) -> Dict[str, Any]:
+        text = text.strip()
+        try: return json.loads(text)
+        except: pass
+        import re
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if match:
+            try: return json.loads(match.group(1))
+            except: pass
+        return {"error": "Failed to parse JSON", "raw": text}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-count = 0
-
-class CountResponse(BaseModel):
-    count: int
-
-@app.get("/count", response_model=CountResponse)
-def get_count():
-    global count
-    return {"count": count}
-
-@app.post("/increment", response_model=CountResponse)
-def increment_count():
-    global count
-    count += 1
-    return {"count": count}
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-"""
-        self._write_file(run_dir, "backend/main.py", backend_main)
-        self._write_file(run_dir, "backend/requirements.txt", "fastapi\nuvicorn\npydantic\n")
-        self._write_frontend_scaffold(run_dir, self._get_counter_frontend())
-        self._write_common_artifacts(run_dir, prompt, "Deterministic Counter App")
-        return {"summary": "Counter App Generated", "run_dir": run_dir}
-
-    def _build_hello(self, run_dir: str, prompt: str) -> Dict[str, Any]:
-        backend_main = """from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.get("/")
-def read_root():
-    return {"message": "Hello from your generated app!"}
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-"""
-        self._write_file(run_dir, "backend/main.py", backend_main)
-        self._write_file(run_dir, "backend/requirements.txt", "fastapi\nuvicorn\n")
-        self._write_frontend_scaffold(run_dir, self._get_hello_frontend())
-        self._write_common_artifacts(run_dir, prompt, "Deterministic Hello World")
-        return {"summary": "Hello World App Generated", "run_dir": run_dir}
-
-    def _build_ai(self, run_dir: str, prompt: str) -> Dict[str, Any]:
-        slug = os.path.basename(run_dir)
+    def _clean_mermaid(self, text: str) -> str:
+        """Cleans up mermaid code from markdown blocks and ensures valid syntax."""
+        import re
+        content = text
         
-        # 1. Generate Backend
-        backend_prompt = (
-            f"Generate a single-file FastAPI backend (main.py) for: {prompt}. "
-            "Include ALL imports, a /health endpoint, and CORS middleware allowing '*'. "
-            "Use Pydantic models. Return ONLY the python code."
-        )
-        # Use generate_code if we trust it, or generate_text and strip fences.
-        # simple_builder uses generate_text for robust fallback logic usually, but adapters has generate_code
-        be_res = self.router.generate_text(backend_prompt, preference=["gemini", "openai", "mistral", "groq", "hf"])
-        be_code = self._clean_code(be_res.get("output", ""))
+        # 1. Remove markdown code blocks
+        content = re.sub(r"```mermaid\s*", "", content, flags=re.IGNORECASE)
+        content = re.sub(r"```\s*", "", content)
         
-        # Fallback if AI fails to give code
-        if "FastAPI" not in be_code:
-             be_code = """from fastapi import FastAPI\napp = FastAPI()\n@app.get("/")\ndef root(): return {"error": "AI failed generation"}\n"""
-
-        self._write_file(run_dir, "backend/main.py", be_code)
-        self._write_file(run_dir, "backend/requirements.txt", "fastapi\nuvicorn\npydantic\npython-multipart\n")
-
-        # 2. Generate Frontend
-        fe_prompt = (
-            f"Generate a React component (App.jsx) for: {prompt}. "
-            "Assume the backend is at VITE_API_BASE. "
-            "Use fetch() to call the endpoints you would expect for this app. "
-            "Use Tailwind CSS classes for styling. Return ONLY the jsx code."
-        )
-        fe_res = self.router.generate_text(fe_prompt, preference=["gemini", "openai", "mistral", "groq", "hf"])
-        fe_code = self._clean_code(fe_res.get("output", ""), lang="jsx")
-
-        # Fallback
-        if "export default" not in fe_code and "function" not in fe_code:
-             fe_code = self._get_hello_frontend()
-
-        self._write_frontend_scaffold(run_dir, fe_code)
-        self._write_common_artifacts(run_dir, prompt, f"AI Generated: {slug}")
+        # 2. Trim whitespace
+        content = content.strip()
         
-        return {"summary": f"AI Build Completed for {slug}", "run_dir": run_dir}
+        # 3. Fallback check
+        if not any(content.startswith(k) for k in ["graph", "sequenceDiagram", "classDiagram", "erDiagram", "flowchart"]):
+            # If AI didn't give a chart, provide a simple placeholder to avoid syntax errors
+            return "graph TD;\n    A[Architecture] --> B[Generated];"
+            
+        return content
 
-    def _clean_code(self, text: str, lang: str = "python") -> str:
-        # Remove markdown fences
-        lines = text.split("\n")
-        clean = []
-        in_fence = False
-        for line in lines:
-            if line.strip().startswith("```"):
-                in_fence = not in_fence
-                continue
-            clean.append(line)
-        return "\n".join(clean).strip()
-
-    def _write_frontend_scaffold(self, run_dir: str, app_jsx: str):
-        self._write_file(run_dir, "frontend/src/App.jsx", app_jsx)
-        self._write_file(run_dir, "frontend/package.json", """{"name": "gen-app", "version": "0.0.0", "scripts": {"dev": "vite", "build": "vite build"}, "dependencies": {"react": "^18.2.0", "react-dom": "^18.2.0"}, "devDependencies": {"@vitejs/plugin-react": "^4.0.0", "vite": "^5.0.0", "tailwindcss": "^3.0.0", "autoprefixer": "^10.0.0", "postcss": "^8.0.0"}}""")
-        self._write_file(run_dir, "frontend/vite.config.js", "import { defineConfig } from 'vite'; import react from '@vitejs/plugin-react'; export default defineConfig({ plugins: [react()], server: { host: '0.0.0.0', port: 5173 } });")
-        self._write_file(run_dir, "frontend/index.html", "<!doctype html><html lang='en'><head><meta charset='UTF-8' /><title>App</title></head><body><div id='root'></div><script type='module' src='/src/main.jsx'></script></body></html>")
-        self._write_file(run_dir, "frontend/src/main.jsx", "import React from 'react'; import ReactDOM from 'react-dom/client'; import App from './App.jsx'; import './index.css'; ReactDOM.createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);")
-        self._write_file(run_dir, "frontend/src/index.css", "@tailwind base; @tailwind components; @tailwind utilities;")
-        self._write_file(run_dir, "frontend/postcss.config.js", "export default { plugins: { tailwindcss: {}, autoprefixer: {} } }")
-        self._write_file(run_dir, "frontend/tailwind.config.js", "export default { content: ['./index.html', './src/**/*.{js,jsx}'], theme: { extend: {} }, plugins: [] }")
-
-    def _write_common_artifacts(self, run_dir: str, prompt: str, summary: str):
-         # Status
-        status = {
-            "prompt": prompt,
-            "timestamp": datetime.utcnow().isoformat(),
-            "success": True,
-            "builder_used": "hybrid"
-        }
-        self._write_file(run_dir, "status.json", json.dumps(status, indent=2))
-        
-        # Readme
-        readme = f"# {prompt}\n\nGenerated by SDLC Agent.\n\n## Run\n- Backend: `uvicorn backend.main:app --reload`\n- Frontend: `npm run dev`"
-        self._write_file(run_dir, "README.md", readme)
-        
-        # Report
-        report = {"files_generated": True, "success": True, "fixe": "none"}
-        self._write_file(run_dir, "run_report.json", json.dumps(report, indent=2))
-
-    def _get_counter_frontend(self):
-        return """import { useState, useEffect } from 'react'
-
-function App() {
-  const [count, setCount] = useState(0)
-  const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
-
-  const fetchCount = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/count`)
-      const data = await res.json()
-      setCount(data.count)
-    } catch (e) { console.error(e) }
-  }
-
-  const increment = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/increment`, { method: 'POST' })
-      const data = await res.json()
-      setCount(data.count)
-    } catch (e) { console.error(e) }
-  }
-
-  useEffect(() => { fetchCount() }, [])
-
-  return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100 p-4">
-      <div className="bg-white shadow-xl rounded-2xl p-8 w-full max-w-sm text-center">
-        <h1 className="text-3xl font-bold text-gray-800 mb-6">Counter App</h1>
-        <div className="text-6xl font-mono text-blue-600 mb-8">{count}</div>
-        <button 
-          onClick={increment}
-          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
-        >
-          Increment
-        </button>
-      </div>
-    </div>
-  )
-}
-export default App
-"""
-
-    def _get_hello_frontend(self):
-        return """import { useState, useEffect } from 'react'
-
-function App() {
-  const [msg, setMsg] = useState('Loading...')
-  const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
-
-  useEffect(() => {
-    fetch(`${API_BASE}/`)
-      .then(r => r.json())
-      .then(d => setMsg(d.message))
-      .catch(e => setMsg('Error'))
-  }, [])
-
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="p-8 bg-white shadow rounded-xl">
-        <h1 className="text-2xl font-bold mb-4">Generated App</h1>
-        <p className="text-gray-600">Backend says: <span className="font-mono text-blue-600">{msg}</span></p>
-      </div>
-    </div>
-  )
-}
-export default App
-"""

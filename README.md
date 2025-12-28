@@ -1,6 +1,8 @@
 # Autonomous SDLC Builder Agent
 
-**v2.0.0 - Production Stabilized**
+# Autonomous SDLC Builder Agent
+
+**v3.0.0 - Autonomous SDLC Orchestrator**
 
 An intelligent, autonomous software development agent that builds full-stack web applications (FastAPI + React) from natural language prompts. It features a robust, self-healing architecture with persistent session management, intelligent AI provider routing, and a professional workspace UI.
 
@@ -8,18 +10,18 @@ An intelligent, autonomous software development agent that builds full-stack web
 
 ### 🧠 Intelligent Core
 *   **Multi-Provider Fallback**: Automatically retries generation with different AI models (OpenAI, Gemini, Mistral, Groq, HF) if the primary provider fails.
-*   **Partial Success Logic**: Distinguishes between "Backend Success" and "Frontend Failure", allowing you to fix specific parts of the stack without restarting.
-*   **Deterministic Shortcuts**: Includes instant, deterministic builds for common templates like "Counter App" or "Hello World".
+*   **Full 6-Phase SDLC**: Executes Planning, Design, Backend, Frontend, Testing (Real Execution), and Deployment Preparation.
+*   **State-Aware Resumability**: Sketches `status.json` checkpoints. If a phase fails, fixing the error and continuing resumes exactly where it left off.
 
 ### 🛡️ Robust Architecture
 *   **"One Job = One Session"**: Strict session binding ensures that a chat session never loses contact with its underlying build job.
 *   **Disk-Based Persistence**: The `runs/` directory is the single source of truth. The server scans this directory on startup, meaning **zero data loss** if the backend restarts.
-*   **Self-Healing State**: If the in-memory state drifts, the system automatically rebuilds it from the keys on disk.
+*   **Real Artifacts**: Generates working `pytest` suites and `Dockerfile`/`docker-compose.yml` for immediate deployment.
 
 ### 💻 Professional Workspace
-*   **Chat Interface**: A ChatGPT-like experience that supports follow-up prompts (e.g., "Fix the error", "Change the color to blue").
-*   **Live Build Context**: Real-time status indicators showing exactly which part of the stack is building and which AI provider is being used.
-*   **History Sidebar**: A persistent history of all your projects, instantly restorable/clickable.
+*   **Chat Interface**: A ChatGPT-like experience that supports follow-up prompts.
+*   **Live Build Context**: Real-time status indicators, **Live Terminal Output**, and Provider Usage Badges.
+*   **Visual Artifacts**: Renders Mermaid architecture diagrams directly in the UI.
 
 ---
 

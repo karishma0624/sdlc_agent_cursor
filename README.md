@@ -1,79 +1,122 @@
-Autonomous SDLC Agent (FastAPI + Streamlit + v0.dev Frontend Generator)
+# Autonomous SDLC Builder Agent
 
-Overview
-- End-to-end agent that executes the SDLC: requirements → design → build → test → deploy → docs.
-- Multi-provider routing with fallbacks (OpenAI, Gemini, Mistral, Groq, HF, Perplexity, Ollama). Safe, runnable local baseline.
-- Backend FastAPI, Streamlit control UI, plus generated frontend (via v0.dev or Vite + Tailwind fallback) inside `runs/`.
+# Autonomous SDLC Builder Agent
 
-Quickstart
-1) Create a venv and install deps (Windows PowerShell):
-   - python -m venv .venv && .venv\Scripts\Activate
-   - pip install -r requirements.txt
-2) (Optional) Create `.env` and add provider keys. Safe to leave empty for local baseline.
-3) Run services:
-   - Backend: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-   - Streamlit UI: streamlit run frontend/app.py
+**v3.0.0 - Autonomous SDLC Orchestrator**
 
-Docker
-- docker compose up --build
+An intelligent, autonomous software development agent that builds full-stack web applications (FastAPI + React) from natural language prompts. It features a robust, self-healing architecture with persistent session management, intelligent AI provider routing, and a professional workspace UI.
 
-APIs (base = http://localhost:8000)
-- GET `/` — API index (endpoints + docs links)
-- GET `/health` — Health check
-- GET `/providers` — Provider availability
-- GET `/logs` — Recent logs
-- POST `/predict` — Image classification demo (multipart: file, notes)
-- POST `/task` — Generic text/code task { prompt }
-- POST `/build` — High-level build orchestrator { prompt }
-- POST `/sdlc/build` — Async full SDLC builder { prompt }
-- GET `/sdlc/status` — Latest or specific job status (?job_id=...)
-- GET `/sdlc/report` — Fetch run_report.json (?job_id=... or ?run_dir=...)
-- POST `/dispatch` — Classify and run best-fit tool { prompt, free_only }
-- POST `/materialize` — Write generated files to runs/ { prompt, free_only }
-- POST `/diagnostics` — Run pytest and flake8
-- POST `/save_spec` — Persist requirements markdown { content, filename? }
-- CRUD: Students, Events, Requirements
+## 🚀 Key Features
 
-What gets generated in a build (example `runs/YYYYMMDD-HHMMSS-<slug>/`)
-- `backend/`
-  - `main.py`, `requirements.txt`, `routes/`, `models/`, `services/`, `tests/`, `tests/test_health.py`
-- `frontend/` (v0.dev preferred; otherwise Vite + Tailwind scaffold)
-  - `package.json`, `index.html`, `vite.config.js`, `tailwind.config.js`, `postcss.config.js`
-  - `src/main.jsx`, `src/index.css`, `src/App.jsx` (Home shows API status, providers, API list)
-- `requirements/` — `requirements.md`, `requirements.json`
-- `docs/` — `index.md`, plus `README.md`, `mkdocs.yml`
-- `pytest.ini`, `Dockerfile`, `docker-compose.yml`, `run_report.json`
+### 🧠 Intelligent Core
+*   **Multi-Provider Fallback**: Automatically retries generation with different AI models (OpenAI, Gemini, Mistral, Groq, HF) if the primary provider fails.
+*   **Full 6-Phase SDLC**: Executes Planning, Design, Backend, Frontend, Testing (Real Execution), and Deployment Preparation.
+*   **State-Aware Resumability**: Sketches `status.json` checkpoints. If a phase fails, fixing the error and continuing resumes exactly where it left off.
 
-How to run the generated frontend
+### 🛡️ Robust Architecture
+*   **"One Job = One Session"**: Strict session binding ensures that a chat session never loses contact with its underlying build job.
+*   **Disk-Based Persistence**: The `runs/` directory is the single source of truth. The server scans this directory on startup, meaning **zero data loss** if the backend restarts.
+*   **Real Artifacts**: Generates working `pytest` suites and `Dockerfile`/`docker-compose.yml` for immediate deployment.
+
+### 💻 Professional Workspace
+*   **Chat Interface**: A ChatGPT-like experience that supports follow-up prompts.
+*   **Live Build Context**: Real-time status indicators, **Live Terminal Output**, and Provider Usage Badges.
+*   **Visual Artifacts**: Renders Mermaid architecture diagrams directly in the UI.
+
+---
+
+## 🛠️ Installation & Setup
+
+### Prerequisites
+*   Python 3.10+
+*   Node.js 18+
+*   An API Key for at least one provider (OpenAI, Gemini, etc.) set in `.env`.
+
+### 1. Backend Setup (FastAPI)
 ```bash
-cd runs/<latest-run>/frontend
+cd backend
+# Create virtual environment (optional but recommended)
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Mac/Linux: source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the Server
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 2. Frontend Setup (React + Vite)
+```bash
+cd frontend
+# Install dependencies
 npm install
+
+# Run the Development Server
 npm run dev
 ```
 
-Diagnostics
+### 3. Access the Agent
+Open your browser to: **http://localhost:5173**
+
+---
+
+## 📖 Usage Guide
+
+### Starting a New Build
+1.  Click **"New Project"** in the sidebar.
+2.  Type your request: *"Build a personal finance tracker with a dashboard."*
+3.  The Agent will:
+    *   Create a persistent Session ID.
+    *   Plan the architecture.
+    *   Generate a `FastAPI` backend (saved to `runs/<timestamp-slug>/backend`).
+    *   Generate a `React` frontend (saved to `runs/<timestamp-slug>/frontend`).
+    *   Update the status live in the UI.
+
+### Continuing a Conversation
+The agent supports context-aware follow-ups.
+*   *User*: "The text is too small."
+*   *Agent*: Triggers a continuation build, modifying the frontend code to increase font size.
+
+### Running Generated Apps
+Each generated project is a standalone codebase located in the `runs/` folder.
+To run a specific project:
 ```bash
-cd runs/<latest-run>
-pytest -q
-flake8
+cd runs/20251225-123456-my-app
+# Run Backend
+python -m uvicorn backend.main:app --reload
+# Run Frontend
+cd frontend && npm install && npm run dev
 ```
 
-Docs
-```bash
-cd runs/<latest-run>
-pip install mkdocs
-mkdocs serve
+---
+
+## 🔧 Troubleshooting
+
+| Issue | Cause | Fix |
+| :--- | :--- | :--- |
+| **"Job not found"** | URL `job_id` mismatch or server cache issue. | **Fixed in v2.0**: The server now checks the disk. Refresh the page. |
+| **"Failed to fetch"** | Backend server is not running. | Ensure `uvicorn` is active on port 8000. |
+| **Input Disabled** | Agent thinks a build is in progress. | The UI unlocks automatically when the backend reports `idle` or `completed`. |
+| **Partial Failure** | One AI provider failed. | Type "Retry generation" in the chat to trigger a new attempt. |
+
+---
+
+## 📂 Project Structure
+
 ```
-
-Docker (combined)
-```bash
-cd runs/<latest-run>
-docker compose up --build
+sdlc_agent_cursor/
+├── backend/
+│   ├── main.py              # Core API & Persistence Logic
+│   ├── simple_builder.py    # AI Orchard & Fallback Logic
+│   └── services/            # Provider Adapters
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── ChatInterface.jsx  # Main Interaction UI
+│   │   │   └── Sidebar.jsx        # History Management
+│   │   └── App.jsx          # Router & Session Manager
+│   └── package.json
+└── runs/                    # ALL GENERATED USER PROJECTS LIVE HERE
 ```
-
-Environment variables (optional)
-- VITE_API_BASE (frontend): default `http://localhost:8000`
-- Provider keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`, `HUGGINGFACE_API_KEY`/`HF_API_KEY`, `PERPLEXITY_API_KEY`, `V0_API_KEY`/`V0_DEV_API_KEY`, `OLLAMA_BASE_URL`
-
-Notes
-- The builder prefers v0.dev for a polished frontend; any missing files are filled with a Vite + Tailwind scaffold so the app is always runnable.

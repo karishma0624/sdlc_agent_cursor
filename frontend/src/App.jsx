@@ -60,7 +60,7 @@ function App() {
       currentSessionId={runId}
       onSelectSession={setRunId}
     >
-      <div className="flex flex-col h-full bg-background-dark max-w-4xl mx-auto border-x border-border-dark shadow-2xl relative">
+      <div className="flex flex-col h-full bg-background-dark w-full relative">
 
         {/* Mobile/Toggle Controller (Visible on ALL screens now to support Toggle) */}
         <div className="px-4 py-3 bg-background-dark z-30 border-b border-border-dark flex justify-center">
@@ -93,7 +93,7 @@ function App() {
               absolute inset-0 transition-all duration-300 bg-surface-dark z-20 
               ${activeTab === 'chat' ? 'opacity-100 pointer-events-auto translate-x-0' : 'opacity-0 pointer-events-none -translate-x-4'}
           `}>
-            <ChatInterface runId={runId} setRunId={setRunId} status={status} />
+            <ChatInterface key={runId} runId={runId} setRunId={setRunId} status={status} />
           </div>
 
           {/* Build Context Tab */}

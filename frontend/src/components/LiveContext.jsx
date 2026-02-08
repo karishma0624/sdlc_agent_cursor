@@ -6,12 +6,13 @@ export default function LiveContext({ status, onSwitchTab }) {
     if (!status) return <div className="p-10 text-center text-slate-500">No active build context</div>;
 
     const phases = [
-        { id: 'planning', label: '1. Planning', icon: FileText },
-        { id: 'design', label: '2. System Design', icon: Map },
-        { id: 'backend', label: '3. Backend Generation', icon: Terminal },
+        { id: 'requirements', label: '1. Requirements', icon: FileText },
+        { id: 'planning', label: '2. Planning', icon: Map },
+        { id: 'design', label: '3. System Design', icon: Map },
         { id: 'frontend', label: '4. Frontend Generation', icon: Terminal },
-        { id: 'tests', label: '5. Testing', icon: CheckCircle },
-        { id: 'deployment', label: '6. Deployment Prep', icon: CheckCircle },
+        { id: 'backend', label: '5. Backend Generation (Disabled)', icon: Terminal },
+        { id: 'tests', label: '6. Testing (Disabled)', icon: CheckCircle },
+        { id: 'deployment', label: '7. Deployment Prep (Disabled)', icon: CheckCircle },
     ];
 
     const currentPhaseIdx = phases.findIndex(p => p.id === status.current_phase);
@@ -28,7 +29,21 @@ export default function LiveContext({ status, onSwitchTab }) {
                 <div className="flex justify-between items-start mb-4">
                     <div>
                         <h2 className="text-sm font-semibold text-white">Live Execution</h2>
-                        <p className="text-xs text-slate-400 mt-1">/usr/projects/{status.run_id?.substring(0, 8)}</p>
+                        <div className="flex items-center gap-2">
+                            <p className="text-xs text-slate-400 mt-1">/usr/projects/{status.run_id?.substring(0, 8)}</p>
+                            <button
+                                onClick={() => {
+                                    fetch('http://localhost:8000/open-folder', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ path: status.run_dir }) // Ensure run_dir is passed from status in main.py
+                                    });
+                                }}
+                                className="ml-2 text-[10px] bg-slate-700 hover:bg-slate-600 text-white px-2 py-0.5 rounded border border-slate-600"
+                            >
+                                Open Output
+                            </button>
+                        </div>
                     </div>
                     <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wide ${status.status === 'running' ? 'bg-primary/20 text-primary border border-primary/20 animate-pulse' :
                         status.status === 'completed' ? 'bg-green-500/20 text-green-400 border border-green-500/20' :

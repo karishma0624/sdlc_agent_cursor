@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Bot, Terminal, CheckCircle, AlertCircle, Loader2, Server, Globe, Map, ChevronRight } from 'lucide-react';
+import { Send, Bot, Terminal, CheckCircle, AlertCircle, Loader2, Server, Globe, Map, ChevronRight, Paperclip, X } from 'lucide-react';
 import Flowchart from './Flowchart';
 
 export default function ChatInterface({ runId, setRunId, status }) {
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
+    const [attachments, setAttachments] = useState([]);
     const messagesEndRef = useRef(null);
+    const fileInputRef = useRef(null);
 
     const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
@@ -30,16 +32,34 @@ export default function ChatInterface({ runId, setRunId, status }) {
         if (!input.trim()) return;
 
         const userMsg = input;
+        const currentAttachments = [...attachments];
+
         setInput('');
+        setAttachments([]);
 
         // Optimistic update
-        setMessages(prev => [...prev, { role: 'user', content: userMsg, timestamp: new Date().toISOString() }]);
+        setMessages(prev => [...prev, {
+            role: 'user',
+            content: userMsg,
+            attachments: currentAttachments,
+            timestamp: new Date().toISOString()
+        }]);
         setLoading(true);
 
         try {
             const isFirstBuild = status?.status === 'idle' || !status?.run_id || status?.prompt === 'New Session';
             const endpoint = isFirstBuild ? `${API_BASE}/sdlc/build` : `${API_BASE}/chat`;
-            const payload = isFirstBuild ? { prompt: userMsg, job_id: runId } : { message: userMsg, job_id: runId };
+
+            // Build payload
+            let payload = { job_id: runId };
+            if (isFirstBuild) {
+                payload.prompt = userMsg;
+                // Note: First build usually implies prompt-only. 
+                // We'll append attachments description to prompt if needed or ignore for V1 simplicity
+            } else {
+                payload.message = userMsg;
+                payload.attachments = currentAttachments;
+            }
 
             await fetch(endpoint, {
                 method: 'POST',
@@ -99,13 +119,28 @@ export default function ChatInterface({ runId, setRunId, status }) {
                             {m.role === 'agent' ? <Bot className="w-4 h-4 text-white" /> : <span className="text-xs text-white font-bold">U</span>}
                         </div>
 
-                        <div className={`flex flex-col gap-1 max-w-[85%] ${m.role === 'user' ? 'items-end' : ''}`}>
+                        <div className={`flex flex-col gap-1 max-w-full ${m.role === 'user' ? 'items-end' : ''}`}>
                             <span className="text-xs font-bold text-slate-400 ml-1">{m.role === 'agent' ? 'SDLC Agent' : 'You'}</span>
                             <div className={`p-3.5 rounded-2xl text-sm leading-relaxed shadow-sm ${m.role === 'agent'
                                 ? 'bg-surface-dark border border-border-dark text-slate-200 rounded-tl-sm'
                                 : 'bg-primary text-white rounded-tr-sm shadow-primary/10'
                                 }`}>
                                 {m.content}
+                                {m.attachments && m.attachments.length > 0 && (
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                        {m.attachments.map((att, idx) => (
+                                            <div key={idx} className="relative group border border-white/20 rounded overflow-hidden">
+                                                {att.type.startsWith('image/') ? (
+                                                    <img src={att.content} alt={att.name} className="h-20 w-auto object-cover" />
+                                                ) : (
+                                                    <div className="h-20 w-20 flex items-center justify-center bg-slate-800 text-xs p-2 text-center text-slate-300">
+                                                        {att.name}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -138,10 +173,50 @@ export default function ChatInterface({ runId, setRunId, status }) {
 
             {/* Input Area */}
             <div className="p-3 bg-background-dark border-t border-border-dark w-full">
+                {attachments.length > 0 && (
+                    <div className="flex gap-2 mb-2 px-2">
+                        {attachments.map((att, i) => (
+                            <div key={i} className="relative bg-surface-dark border border-slate-700 rounded p-1 flex items-center gap-2">
+                                <span className="text-[10px] text-slate-300 max-w-[100px] truncate">{att.name}</span>
+                                <button onClick={() => setAttachments(prev => prev.filter((_, idx) => idx !== i))} className="text-slate-500 hover:text-white">
+                                    <X className="w-3 h-3" />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
                 <form
                     onSubmit={handleSubmit}
                     className="relative flex items-end gap-2 bg-surface-dark border border-border-dark rounded-xl p-2 focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/50 transition-all shadow-lg"
                 >
+                    <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="p-2 mb-0.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors"
+                    >
+                        <Paperclip className="w-5 h-5" />
+                    </button>
+                    <input
+                        type="file"
+                        ref={fileInputRef}
+                        className="hidden"
+                        multiple
+                        onChange={(e) => {
+                            const files = Array.from(e.target.files);
+                            files.forEach(file => {
+                                const reader = new FileReader();
+                                reader.onloadend = () => {
+                                    setAttachments(prev => [...prev, {
+                                        name: file.name,
+                                        type: file.type,
+                                        content: reader.result
+                                    }]);
+                                };
+                                reader.readAsDataURL(file);
+                            });
+                            e.target.value = null; // reset
+                        }}
+                    />
                     <textarea
                         value={input}
                         onChange={e => setInput(e.target.value)}

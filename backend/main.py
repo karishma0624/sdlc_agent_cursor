@@ -271,6 +271,7 @@ class BuildRequest(BaseModel):
 class ChatRequest(BaseModel):
     job_id: str
     message: str
+    attachments: Optional[list] = [] # List of {name, type, content(base64)}
 
 @app.post("/chat")
 def chat_endpoint(req: ChatRequest):
@@ -299,7 +300,12 @@ def chat_endpoint(req: ChatRequest):
             with open(chat_path, "r") as f: chat_log = json.load(f)
         except: pass
         
-    chat_log.append({"role": "user", "content": req.message, "timestamp": datetime.utcnow().isoformat()})
+    chat_log.append({
+        "role": "user", 
+        "content": req.message, 
+        "attachments": req.attachments,
+        "timestamp": datetime.utcnow().isoformat()
+    })
     with open(chat_path, "w") as f:
         json.dump(chat_log, f, indent=2)
         
@@ -537,44 +543,53 @@ def sdlc_status(job_id: Optional[str] = None):
         
 
 
+@app.post("/open-folder")
+def open_folder(req: Dict[str, str]):
+    path = req.get("path")
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Path not found")
+    
+    try:
+        if os.name == 'nt':
+            os.startfile(path)
+        elif os.name == 'posix':
+            subprocess.call(['open', path] if sys.platform == 'darwin' else ['xdg-open', path])
+        return {"status": "opened"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/runs/{job_id}")
+def delete_run(job_id: str):
+    with _LOCK:
+        job = _BUILD_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        run_dir = job.get("run_dir")
+        if run_dir and os.path.exists(run_dir):
+            import shutil
+            try:
+                shutil.rmtree(run_dir)
+            except Exception as e:
+                print(f"Error deleting dir {run_dir}: {e}")
+        
+        del _BUILD_JOBS[job_id]
+        save_jobs(_BUILD_JOBS)
+        
+    return {"status": "deleted", "job_id": job_id}
+
 @app.get("/providers")
 def get_providers():
-    builder.router.refresh()
-    # CONTRACT: Nested "providers" object with lowercase keys
-    p = builder.router.providers
+    # builder.router is removed. Check Env directly.
     return {
         "providers": {
-            "openai": p.get("openai", False),
-            "gemini": p.get("gemini", False),
-            "mistral": p.get("mistral", False),
-            "groq": p.get("groq", False),
-            "hf": p.get("hf", False),
-            "ollama": p.get("ollama", False),
-            "v0": p.get("v0", False),
-            "perplexity": p.get("perplexity", False),
-            "lovable": p.get("lovable", False),
-            "stitch": p.get("stitch", False)
+            "openai": bool(os.getenv("OPENAI_API_KEY")),
+            "gemini": bool(os.getenv("GEMINI_API_KEY")),
+            "mistral": bool(os.getenv("MISTRAL_API_KEY")),
+            "v0": bool(os.getenv("V0_API_KEY") or os.getenv("V0_DEV_API_KEY")),
+            "mermaid": True # Always available via Gemini/Adapter
         }
     }
-
-@app.get("/sdlc/report")
-def sdlc_report(job_id: Optional[str] = None):
-    target_dir = None
-    current_jobs = load_jobs()
-    if job_id:
-        job = current_jobs.get(job_id)
-        if job:
-            target_dir = job.get("run_dir")
-    
-    if not target_dir:
-        return {"error": "job not found or no run_dir"}
-        
-    report_path = os.path.join(target_dir, "run_report.json")
-    if os.path.exists(report_path):
-        with open(report_path, "r") as f:
-            return json.load(f)
-    return {"error": "report missing"}
-
 
 # -------------------------------------------------
 # ROOT

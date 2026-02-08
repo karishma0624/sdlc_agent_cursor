@@ -6,13 +6,16 @@ export default function BuildStatus({ jobId }) {
     const [report, setReport] = useState(null);
     const [polling, setPolling] = useState(true);
 
+    const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+
     useEffect(() => {
         if (!jobId) return;
 
         let intervalId;
         const fetchStatus = async () => {
             try {
-                const res = await fetch(`/api/sdlc/status?job_id=${jobId}`);
+                // Use full URL to avoid proxy issues, consistent with ChatInterface
+                const res = await fetch(`${API_BASE}/sdlc/status?job_id=${jobId}`);
                 if (res.ok) {
                     const data = await res.json();
                     setStatus(data);
@@ -21,8 +24,12 @@ export default function BuildStatus({ jobId }) {
                         setPolling(false);
                         if (data.status === 'completed') {
                             // Fetch final report
-                            const repRes = await fetch(`/api/sdlc/report?job_id=${jobId}`);
-                            if (repRes.ok) setReport(await repRes.json());
+                            try {
+                                const repRes = await fetch(`${API_BASE}/sdlc/report?job_id=${jobId}`);
+                                if (repRes.ok) setReport(await repRes.json());
+                            } catch (e) {
+                                console.warn("Failed to fetch report, possibly not ready yet", e);
+                            }
                         }
                     }
                 }
@@ -37,7 +44,7 @@ export default function BuildStatus({ jobId }) {
         }
 
         return () => clearInterval(intervalId);
-    }, [jobId, polling]);
+    }, [jobId, polling, API_BASE]);
 
     if (!jobId) return null;
 
@@ -67,7 +74,7 @@ export default function BuildStatus({ jobId }) {
                     <div className="space-y-2 text-sm text-gray-600">
                         <div className="flex justify-between">
                             <span>Started:</span>
-                            <span className="font-mono">{new Date(status.started_at).toLocaleTimeString()}</span>
+                            <span className="font-mono">{status.started_at ? new Date(status.started_at).toLocaleTimeString() : '...'}</span>
                         </div>
                         {status.finished_at && (
                             <div className="flex justify-between">

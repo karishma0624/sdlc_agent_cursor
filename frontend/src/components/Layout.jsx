@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Menu, Plus, MessageSquare, Clock, Settings, User } from 'lucide-react';
+import { Menu, Plus, MessageSquare, Clock, Settings, User, Bot } from 'lucide-react';
 
 export default function Layout({ children, onNewSession, sessions, currentSessionId, onSelectSession }) {
     const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -10,7 +10,7 @@ export default function Layout({ children, onNewSession, sessions, currentSessio
             <div className={`${sidebarOpen ? 'w-64' : 'w-0'} transition-all duration-300 bg-background-dark border-r border-border-dark flex flex-col shrink-0 overflow-hidden`}>
                 <div className="p-5 border-b border-border-dark flex items-center gap-2">
                     <div className="w-8 h-8 rounded bg-gradient-to-br from-primary to-purple-600 flex items-center justify-center shrink-0">
-                        <span className="material-symbols-outlined text-white text-lg">smart_toy</span>
+                        <Bot className="w-5 h-5 text-white" />
                     </div>
                     <span className="font-bold text-lg tracking-tight text-white whitespace-nowrap">SDLC Agent</span>
                 </div>
@@ -32,15 +32,15 @@ export default function Layout({ children, onNewSession, sessions, currentSessio
                             key={session.job_id}
                             onClick={() => onSelectSession(session.job_id)}
                             className={`group flex flex-col gap-1 p-3 rounded-lg cursor-pointer border transition-colors ${currentSessionId === session.job_id
-                                    ? 'bg-surface-dark border-primary/30'
-                                    : 'border-transparent hover:bg-surface-dark hover:border-border-dark'
+                                ? 'bg-surface-dark border-primary/30'
+                                : 'border-transparent hover:bg-surface-dark hover:border-border-dark'
                                 }`}
                         >
                             <div className="flex justify-between items-start">
                                 <span className="font-medium text-slate-300 text-sm truncate max-w-[120px]">{session.prompt || "New Session"}</span>
                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono capitalize ${session.status === 'completed' ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
-                                        session.status === 'failed' ? 'bg-red-500/10 text-red-400 border border-red-500/20' :
-                                            'bg-primary/20 text-primary-300 border border-primary/20'
+                                    session.status === 'failed' ? 'bg-red-500/10 text-red-400 border border-red-500/20' :
+                                        'bg-primary/20 text-primary-300 border border-primary/20'
                                     }`}>
                                     {session.status}
                                 </span>

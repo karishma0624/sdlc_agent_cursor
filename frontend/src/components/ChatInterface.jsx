@@ -55,11 +55,29 @@ export default function ChatInterface({ runId, setRunId, status }) {
         }
     };
 
-    if (!runId) return (
-        <div className="flex items-center justify-center h-full text-slate-500">
-            Select or create a new project to start.
+    if (!runId && messages.length === 0) return (
+        <div className="flex items-center justify-center h-full text-slate-500 flex-col gap-4">
+            <Bot className="w-12 h-12 opacity-50" />
+            <span>Select or create a new project to start.</span>
         </div>
     );
+
+    // Auto-fix for lost jobs if we have no messages but a runId that failed
+    if (status?.status === 'not_found') {
+        return (
+            <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-4 p-8 text-center">
+                <AlertCircle className="w-12 h-12 text-error" />
+                <h3 className="text-lg font-bold text-white">Session Not Found</h3>
+                <p className="max-w-md">This session seems to have been deleted or the server was restarted without persistence. Please create a new session.</p>
+                <button
+                    onClick={() => setRunId(null)}
+                    className="px-4 py-2 bg-primary text-white rounded hover:bg-primary-dark transition-colors"
+                >
+                    Go Back
+                </button>
+            </div>
+        );
+    }
 
     return (
         <div className="flex flex-col h-full bg-background-dark">
@@ -160,7 +178,7 @@ export default function ChatInterface({ runId, setRunId, status }) {
                     </div>
                 )}
                 {/* Error Toast (Simple) */}
-                {status && status.error && (
+                {status && status.error && !status.error.includes("Syntax error") && (
                     <div className="mt-2 text-center">
                         <span className="text-[10px] text-error flex items-center justify-center gap-1">
                             <AlertCircle className="w-3 h-3" />

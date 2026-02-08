@@ -6,3 +6,14 @@ backend/__pycache__/
 backend/services/__pycache__/
 
 systemprompt.txt
+frontend/node_modules/
+
+backend/runs/
+.pytest_cache/
+.venv/
+.env
+.streamlit/
+.vscode/
+.idea/
+.cursor/
+.cursorrules

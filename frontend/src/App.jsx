@@ -42,8 +42,10 @@ function App() {
         const data = await res.json();
         setStatus(data);
 
-        // Auto-switch to build tab if running for the first time? 
-        // No, user requested explicit tabs. But we can show notification badges.
+        // Update Sessions list with new status to keep sidebar in sync
+        setSessions(prev => prev.map(s =>
+          s.job_id === runId ? { ...s, status: data.status, prompt: data.prompt || s.prompt } : s
+        ));
       } catch (e) {
         console.error(e);
       }
@@ -60,9 +62,9 @@ function App() {
     >
       <div className="flex flex-col h-full bg-background-dark max-w-4xl mx-auto border-x border-border-dark shadow-2xl relative">
 
-        {/* Mobile/Toggle Switch */}
-        <div className="px-4 py-3 bg-background-dark z-30 border-b border-border-dark">
-          <div className="bg-surface-dark p-1 rounded-lg flex relative">
+        {/* Mobile/Toggle Controller (Visible on ALL screens now to support Toggle) */}
+        <div className="px-4 py-3 bg-background-dark z-30 border-b border-border-dark flex justify-center">
+          <div className="bg-surface-dark p-1 rounded-lg flex relative w-full max-w-md">
             <button
               onClick={() => setActiveTab('chat')}
               className={`flex-1 py-2 text-sm font-medium rounded-md transition-all text-center ${activeTab === 'chat' ? 'bg-border-dark text-white shadow-sm' : 'text-slate-400 hover:text-white'
@@ -83,16 +85,23 @@ function App() {
           </div>
         </div>
 
-        {/* Content Area */}
+        {/* Content Area - Tabbed View */}
         <div className="flex-1 overflow-hidden relative">
-          {/* Chat Tab - Always rendered but hidden via CSS/Transform if inactive to maintain state */}
-          <div className={`absolute inset-0 transition-opacity duration-300 ${activeTab === 'chat' ? 'opacity-100 z-10 pointer-events-auto' : 'opacity-0 z-0 pointer-events-none'}`}>
+
+          {/* Chat Tab */}
+          <div className={`
+              absolute inset-0 transition-all duration-300 bg-surface-dark z-20 
+              ${activeTab === 'chat' ? 'opacity-100 pointer-events-auto translate-x-0' : 'opacity-0 pointer-events-none -translate-x-4'}
+          `}>
             <ChatInterface runId={runId} setRunId={setRunId} status={status} />
           </div>
 
           {/* Build Context Tab */}
-          <div className={`absolute inset-0 transition-opacity duration-300 ${activeTab === 'build' ? 'opacity-100 z-10 pointer-events-auto' : 'opacity-0 z-0 pointer-events-none'}`}>
-            <LiveContext status={status} />
+          <div className={`
+              absolute inset-0 transition-all duration-300 bg-background-dark z-20
+              ${activeTab === 'build' ? 'opacity-100 pointer-events-auto translate-x-0' : 'opacity-0 pointer-events-none translate-x-4'}
+          `}>
+            <LiveContext status={status} onSwitchTab={setActiveTab} />
           </div>
         </div>
       </div>

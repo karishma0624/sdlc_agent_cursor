@@ -54,13 +54,25 @@ export default function Sidebar({ onNewChat, onSelectRun, selectedRunId }) {
                             key={run.job_id}
                             onClick={() => onSelectRun(run.job_id)}
                             className={`w-full text-left p-3 rounded-md text-sm truncate flex items-center gap-2 transition-colors ${selectedRunId === run.job_id
-                                    ? 'bg-gray-800 text-white'
-                                    : 'hover:bg-gray-800/50'
+                                ? 'bg-gray-800 text-white'
+                                : 'hover:bg-gray-800/50'
                                 }`}
                         >
                             <Clock className="w-3 h-3 shrink-0 opacity-50" />
                             <span className="truncate">
-                                {run.prompt || "Untitled Project"}
+                                <div className="flex flex-col overflow-hidden w-full">
+                                    <span className="truncate font-medium">{run.prompt || "New Session"}</span>
+                                    <div className="flex justify-between items-center text-[10px] text-gray-500 mt-1">
+                                        <span>{run.started_at ? new Date(run.started_at).toLocaleDateString() : 'Just now'}</span>
+                                        <span className={`px-1.5 py-0.5 rounded-sm capitalize ${run.status === 'running' ? 'bg-blue-500/20 text-blue-400' :
+                                                run.status === 'failed' ? 'bg-red-500/20 text-red-400' :
+                                                    run.status === 'completed' ? 'bg-green-500/20 text-green-400' :
+                                                        'bg-gray-700 text-gray-400'
+                                            }`}>
+                                            {run.status}
+                                        </span>
+                                    </div>
+                                </div>
                             </span>
                         </button>
                     ))}

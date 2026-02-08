@@ -19,6 +19,11 @@ from dotenv import load_dotenv
 # ENV
 # -------------------------------------------------
 load_dotenv()
+if not os.getenv("CheckEnv"):
+    # Fallback to parent .env if valid keys are missing or file prevents it
+    # But simpler: explicit path check
+    if not os.path.exists(".env") and os.path.exists("../.env"):
+        load_dotenv("../.env")
 
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-me")
 ALGORITHM = "HS256"
@@ -247,6 +252,14 @@ def new_session():
             "summary": None,
             "error": None
         }
+        # CRITICAL FIX: Persist initial state to disk immediately so restarts don't lose the job
+        try:
+            builder._save_json(run_dir, "status.json", _BUILD_JOBS[job_id])
+            # Initialize empty chat log
+            builder._save_json(run_dir, "chat.json", [])
+        except Exception as e:
+            print(f"Failed to persist new session: {e}")
+            
         save_jobs(_BUILD_JOBS)
         
     return {"job_id": job_id, "created_at": started_at, "status": "idle"}
@@ -419,107 +432,110 @@ def sdlc_build(req: BuildRequest):
 def list_runs():
     """Return historical runs for the sidebar."""
     current_jobs = load_jobs()
-    # Sort by started_at desc
-    sorted_jobs = sorted(current_jobs.values(), key=lambda x: x.get("started_at", ""), reverse=True)
+    # Sort by started_at desc, handle None by using a very old date
+    
+    def get_sort_key(job):
+        s = job.get("started_at")
+        if not s: 
+            return "1970-01-01"
+        return s
+
+    sorted_jobs = sorted(current_jobs.values(), key=get_sort_key, reverse=True)
     return {"runs": sorted_jobs}
 
 @app.get("/sdlc/status")
 def sdlc_status(job_id: Optional[str] = None):
     global _BUILD_JOBS
+    # 1. Check Memory
+    job = _BUILD_JOBS.get(job_id)
     
-    if job_id:
-        # 1. Check Memory
+    # 2. If missing, FORCE DISK RESCAN (Self-Healing)
+    if not job:
+        print(f"Job {job_id} missing from memory, scanning disk...")
+        _BUILD_JOBS = rebuild_jobs_from_disk()
         job = _BUILD_JOBS.get(job_id)
-        
-        # 2. If missing, FORCE DISK RESCAN (Self-Healing)
-        if not job:
-            print(f"Job {job_id} missing from memory, scanning disk...")
-            _BUILD_JOBS = rebuild_jobs_from_disk()
-            job = _BUILD_JOBS.get(job_id)
 
-        if not job:
-             return {
-                "job_id": job_id,
-                "status": "not_found",
-                "error": "Job not found on disk", 
-                "run_dir": None
-            }
-            
-        # 3. Always refresh from status.json to get latest BUILDER updates
-        # The builder runs in a thread and writes to disk. Memory might be stale.
-        if job.get("run_dir"):
-            try:
-                p = os.path.join(job["run_dir"], "status.json")
-                if os.path.exists(p):
-                    with open(p, "r") as f:
-                        live_status = json.load(f)
-                        _BUILD_JOBS[job_id].update(live_status) # Sync memory
-                        job = _BUILD_JOBS[job_id]
-            except:
-                pass
-
-            try:
-                # Load flowchart
-                fc_path = os.path.join(job["run_dir"], "design", "flowchart.mmd")
-                if not os.path.exists(fc_path):
-                     # Fallback for old runs
-                     fc_path = os.path.join(job["run_dir"], "flowchart.mmd")
-                
-                if os.path.exists(fc_path):
-                    with open(fc_path, "r", encoding="utf-8") as f:
-                        job["flowchart"] = f.read()
-            except:
-                pass
-                
-            try:
-                # Load providers history
-                prov_path = os.path.join(job["run_dir"], "providers_used.json")
-                if os.path.exists(prov_path):
-                     with open(prov_path, "r") as f:
-                         job["providers_history"] = json.load(f).get("history", [])
-            except:
-                pass
-
-            try:
-                # Load test report
-                test_path = os.path.join(job["run_dir"], "tests", "test_report.json")
-                if not os.path.exists(test_path):
-                     # Fallback
-                     test_path = os.path.join(job["run_dir"], "test_report.json")
-
-                if os.path.exists(test_path):
-                     with open(test_path, "r") as f:
-                         job["test_report"] = json.load(f)
-            except:
-                pass
-                
-        # 4. LOAD CHAT HISTORY
-        run_dir = job.get("run_dir")
-        if run_dir:
-            chat_path = os.path.join(run_dir, "chat.json")
-            if os.path.exists(chat_path):
-                try:
-                    with open(chat_path, "r") as f:
-                        job["messages"] = json.load(f)
-                except:
-                    job["messages"] = []
-            else:
-                job["messages"] = []
-
-        return {
-            "run_id": job.get("job_id"),
-            "status": job.get("status"),
-            "current_phase": job.get("current_phase", "planning"),
-            "phases": job.get("phases", {}),
-            "messages": job.get("messages", []),
-            "flowchart": job.get("flowchart"),
-            "providers_history": job.get("providers_history", []),
-            "test_report": job.get("test_report")
+    if not job:
+            return {
+            "job_id": job_id,
+            "status": "not_found",
+            "error": "Job not found on disk", 
+            "run_dir": None
         }
         
-    # List all (Force Refresh)
-    _BUILD_JOBS = rebuild_jobs_from_disk()
-    return {"jobs": list(_BUILD_JOBS.values())}
+    # 3. Always refresh from status.json to get latest BUILDER updates
+    # The builder runs in a thread and writes to disk. Memory might be stale.
+    if job.get("run_dir"):
+        try:
+            p = os.path.join(job["run_dir"], "status.json")
+            if os.path.exists(p):
+                with open(p, "r") as f:
+                    live_status = json.load(f)
+                    _BUILD_JOBS[job_id].update(live_status) # Sync memory
+                    job = _BUILD_JOBS[job_id]
+        except:
+            pass
+
+        try:
+            # Load flowchart
+            fc_path = os.path.join(job["run_dir"], "design", "flowchart.mmd")
+            if not os.path.exists(fc_path):
+                    # Fallback for old runs
+                    fc_path = os.path.join(job["run_dir"], "flowchart.mmd")
+            
+            if os.path.exists(fc_path):
+                with open(fc_path, "r", encoding="utf-8") as f:
+                    job["flowchart"] = f.read()
+        except:
+            pass
+            
+        try:
+            # Load providers history
+            prov_path = os.path.join(job["run_dir"], "providers_used.json")
+            if os.path.exists(prov_path):
+                    with open(prov_path, "r") as f:
+                        job["providers_history"] = json.load(f).get("history", [])
+        except:
+            pass
+
+        try:
+            # Load test report
+            test_path = os.path.join(job["run_dir"], "tests", "test_report.json")
+            if not os.path.exists(test_path):
+                    # Fallback
+                    test_path = os.path.join(job["run_dir"], "test_report.json")
+
+            if os.path.exists(test_path):
+                    with open(test_path, "r") as f:
+                        job["test_report"] = json.load(f)
+        except:
+            pass
+            
+    # 4. LOAD CHAT HISTORY
+    run_dir = job.get("run_dir")
+    if run_dir:
+        chat_path = os.path.join(run_dir, "chat.json")
+        if os.path.exists(chat_path):
+            try:
+                with open(chat_path, "r") as f:
+                    job["messages"] = json.load(f)
+            except:
+                job["messages"] = []
+        else:
+            job["messages"] = []
+
+    return {
+        "run_id": job.get("job_id"),
+        "status": job.get("status"),
+        "current_phase": job.get("current_phase", "planning"),
+        "phases": job.get("phases", {}),
+        "messages": job.get("messages", []),
+        "flowchart": job.get("flowchart"),
+        "providers_history": job.get("providers_history", []),
+        "test_report": job.get("test_report")
+    }
+        
+
 
 @app.get("/providers")
 def get_providers():

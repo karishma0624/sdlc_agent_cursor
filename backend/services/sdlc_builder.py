@@ -124,19 +124,17 @@ class SDLCBuilder:
             files_written = 0
             files_created: set[str] = set()
             used_v0 = False
-            if (not self.fast_mode) and self.router.providers.get("v0"):
-                resp = self.router.run_tool(
-                    "v0",
-                    (
-                        "Create a modern, attractive React (Vite) + Tailwind frontend that consumes the following API base "
-                        "(env VITE_API_BASE, default http://localhost:8000). Include a home page that shows API status and a card grid "
-                        "of available endpoints by fetching '/' (API index) and '/providers'. Create clean components and responsive layout."
-                    ),
+            if not self.fast_mode:
+                instruction = (
+                    "Create a modern, attractive React (Vite) + Tailwind frontend that consumes the following API base "
+                    "(env VITE_API_BASE, default http://localhost:8000). Include a home page that shows API status and a card grid "
+                    "of available endpoints by fetching '/' (API index) and '/providers'. Create clean components and responsive layout. "
+                    "Ensure you create at least src/App.jsx and src/index.css. Return ONLY a JSON mapping file paths to contents."
                 )
-                files = resp.get("files") if isinstance(resp, dict) else None
-                fe_models = {"provider": "v0", "model": (resp.get("model") if isinstance(resp, dict) else None)}
-                if files:
-                    used_v0 = True
+                gen = self.router.generate_code(f"{instruction}\nPrompt: {prompt}")
+                files = gen.get("files") or {}
+                fe_models = {"provider": gen.get("provider"), "model": gen.get("model")}
+                if isinstance(files, dict) and files:
                     for rel, content in files.items():
                         path = os.path.join(frontend_root, rel)
                         self._write_text(path, content)

@@ -578,6 +578,7 @@ def delete_run(job_id: str):
         
     return {"status": "deleted", "job_id": job_id}
 
+
 @app.get("/providers")
 def get_providers():
     # builder.router is removed. Check Env directly.
@@ -586,10 +587,45 @@ def get_providers():
             "openai": bool(os.getenv("OPENAI_API_KEY")),
             "gemini": bool(os.getenv("GEMINI_API_KEY")),
             "mistral": bool(os.getenv("MISTRAL_API_KEY")),
+            "groq": bool(os.getenv("GROQ_API_KEY")),
             "v0": bool(os.getenv("V0_API_KEY") or os.getenv("V0_DEV_API_KEY")),
             "mermaid": True # Always available via Gemini/Adapter
         }
     }
+
+# -------------------------------------------------
+# OPEN OUTPUT FOLDER
+# -------------------------------------------------
+class OpenFolderRequest(BaseModel):
+    path: str
+
+@app.post("/open-folder")
+def open_folder(req: OpenFolderRequest):
+    """Opens the specified folder in Windows Explorer"""
+    import subprocess
+    import platform
+    
+    try:
+        # Convert relative path to absolute
+        if not os.path.isabs(req.path):
+            abs_path = os.path.abspath(req.path)
+        else:
+            abs_path = req.path
+            
+        if not os.path.exists(abs_path):
+            raise HTTPException(status_code=404, detail=f"Path not found: {abs_path}")
+        
+        # Open folder based on OS
+        if platform.system() == "Windows":
+            subprocess.Popen(f'explorer "{abs_path}"')
+        elif platform.system() == "Darwin":  # macOS
+            subprocess.Popen(["open", abs_path])
+        else:  # Linux
+            subprocess.Popen(["xdg-open", abs_path])
+            
+        return {"success": True, "path": abs_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # -------------------------------------------------
 # ROOT
@@ -597,3 +633,8 @@ def get_providers():
 @app.get("/")
 def root():
     return {"message": "Autonomous SDLC Builder API running"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+

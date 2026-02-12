@@ -4,13 +4,11 @@ import os
 import json
 from datetime import datetime
 
-from .adapters import InferenceRouter
 from .metrics import MetricsLogger
 
 
 class SDLCBuilder:
     def __init__(self, runs_dir: str = "runs", fast_mode: bool = False) -> None:
-        self.router = InferenceRouter()
         self.metrics = MetricsLogger()
         self.runs_dir = runs_dir
         self.fast_mode = fast_mode

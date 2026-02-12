@@ -1,6 +1,7 @@
 import os
 import requests
 import json
+import re
 from typing import Dict, Any, Optional
 
 # ==============================================================================
@@ -8,7 +9,7 @@ from typing import Dict, Any, Optional
 # ==============================================================================
 # Mistral API       -> Requirements, Planning
 # Gemini API        -> Frontend (Primary)
-# Mermaid (LLM)     -> Design (Diagrams)
+# Mermaid (LLM)     -> Design (Diagrams - via Gemini)
 # v0 API            -> Frontend (Fallback)
 # ==============================================================================
 
@@ -20,7 +21,7 @@ def call_mistral(prompt: str, model: str = "mistral-small-latest") -> str:
     """
     api_key = os.getenv("MISTRAL_API_KEY")
     if not api_key:
-        raise ValueError("MISTRAL_API_KEY is missing. Cannot proceed with Requirements/Planning.")
+        raise ValueError("MISTRAL_API_KEY is missing.")
         
     url = "https://api.mistral.ai/v1/chat/completions"
     headers = {
@@ -34,7 +35,7 @@ def call_mistral(prompt: str, model: str = "mistral-small-latest") -> str:
     }
     
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()
         return data["choices"][0]["message"]["content"].strip()
@@ -44,95 +45,172 @@ def call_mistral(prompt: str, model: str = "mistral-small-latest") -> str:
 
 def call_mermaid(prompt: str, intent_context: Dict) -> str:
     """
-    Approximation: Calls a capable LLM (Gemini or OpenAI) specifically to generate Mermaid syntax.
-    We route this to Gemini by default as 'Mermaid Provider'.
+    Calls Gemini to generate Mermaid syntax.
     """
-    # Strict routing: Use Gemini for Mermaid generation as it's good at syntax
-    # If standard Mermaid service exists, we would use it, but here we generate code.
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        # Fallback to simple deterministic graph if no Keys
-        return "graph TD;\n    Start-->End;"
+    if not os.getenv("GEMINI_API_KEY"):
+        return "graph TD;\n    Error[Missing GEMINI_KEY]-->Stop;"
 
-    # We reuse the logic but strictly for mermaid
-    # If Gemini available
-    if os.getenv("GEMINI_API_KEY"):
-        return _call_gemini_text(f"{prompt}\n\nContext: {json.dumps(intent_context)}", model="gemini-1.5-flash")
-    
-    return "graph TD;\n    Error[Missing Key]-->Stop;"
+    return _call_gemini_text(f"{prompt}\n\nContext: {json.dumps(intent_context)}", model="gemini-1.5-flash")
 
+
+def _get_gemini_models(api_key: str) -> list[str]:
+    """Dynamically fetch available models from Gemini API"""
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        resp = requests.get(url, timeout=10)
+        if resp.ok:
+            data = resp.json()
+            # Filter for generateContent support
+            models = [m['name'].replace('models/', '') for m in data.get('models', []) 
+                     if 'generateContent' in m.get('supportedGenerationMethods', [])]
+            # Prioritize flash models
+            models.sort(key=lambda x: 'flash' not in x)
+            return models
+    except:
+        pass
+    return ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
 
 def call_gemini(prompt: str, model: str = "gemini-1.5-flash") -> Dict[str, str]:
     """
     Strictly calls Gemini for JSON file generation (Frontend Phase).
-    Expects specific JSON structure in return.
+    Tries multiple models in order of preference if the default fails.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY is missing. Cannot proceed with Frontend Primary.")
+        raise ValueError("GEMINI_API_KEY is missing.")
 
-    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
+    # Dynamically correct models + fallbacks
+    models_to_try = _get_gemini_models(api_key)
+    # Remove duplicates while preserving order
+    unique_models = []
+    [unique_models.append(m) for m in models_to_try if m not in unique_models]
     
-    # Enforce JSON structure via prompt engineering (Gemini supports responseSchema but we'll stick to prompt for now for compat)
-    final_prompt = (
-        f"{prompt}\n\n"
-        "IMPORTANT: Output ONLY valid JSON. No markdown fences. No explanations.\n"
-        "Format: {\"files\": {\"path/to/file\": \"content\"}}"
-    )
-    
-    payload = {
-        "contents": [{"parts": [{"text": final_prompt}]}],
-        "generationConfig": {"temperature": 0.2}
-    }
-    
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+    last_error = None
+
+    for current_model in unique_models:
+        # Use v1beta for newer models, v1 for older if needed, but v1beta is generally safer for all recently
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={api_key}"
+        headers = {"Content-Type": "application/json"}
         
-        # Extract Text
-        cands = data.get("candidates", [])
-        if not cands:
-            raise ValueError("Gemini returned no candidates.")
+        final_prompt = (
+            f"{prompt}\n\n"
+            "IMPORTANT: Output ONLY valid JSON. No markdown fences. No explanations.\n"
+            "The JSON must strictly follow this schema: {\"files\": {\"path/to/file.ext\": \"file content string\"}}\n"
+        )
+        
+        payload = {
+            "contents": [{"parts": [{"text": final_prompt}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json"
+            }
+        }
+        
+        try:
+            print(f"  > Attempting Gemini model: {current_model}")
+            resp = requests.post(url, headers=headers, json=payload, timeout=120)
             
-        text = cands[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        
-        # Parse JSON
-        return _parse_json_garbage(text)
-        
-    except Exception as e:
-        raise RuntimeError(f"Gemini API Call Failed: {str(e)}")
+            # If 404 or 400, try next model
+            if resp.status_code in [404, 400, 500, 503]:
+                 error_msg = f"{resp.status_code} {resp.text}"
+                 print(f"  > Gemini {current_model} failed: {error_msg}")
+                 last_error = error_msg
+                 continue
+                 
+            resp.raise_for_status()
+            data = resp.json()
+            
+            cands = data.get("candidates", [])
+            if not cands:
+                # Check for prompt feedback block etc.
+                if "promptFeedback" in data:
+                     print(f"  > Prompt blocked: {data['promptFeedback']}")
+                raise ValueError("Gemini returned no candidates.")
+                
+            text = cands[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            
+            parsed = _parse_json_garbage(text)
+            if "files" not in parsed:
+                # Fallback for structure mismatch
+                if any(k.startswith("src/") for k in parsed.keys()):
+                     return parsed
+                # If parsed is a list or just string, fail.
+                # But sometimes it returns just the file content? unlikely with this prompt.
+                # Heuristic: check if keys look like file paths
+                if isinstance(parsed, dict) and len(parsed) > 0:
+                     # Check if keys have extensions
+                     if any("." in k for k in parsed.keys()):
+                         return parsed
+
+                raise ValueError("Gemini response missing 'files' key.")
+            return parsed["files"]
+            
+        except Exception as e:
+            last_error = str(e)
+            print(f"  > Gemini {current_model} Exception: {e}")
+            continue
+
+    raise RuntimeError(f"Gemini API Call Failed (All models): {last_error}")
 
 
 def call_v0(prompt: str) -> Dict[str, str]:
     """
-    Fallback for Frontend. Calls v0.dev API.
+    Fallback for Frontend. Calls v0.dev API with robust error handling.
+    Try 'generate' endpoint first, then 'chat/completions'.
     """
     api_key = os.getenv("V0_API_KEY") or os.getenv("V0_DEV_API_KEY")
     if not api_key:
-        raise ValueError("V0_API_KEY is missing. Cannot proceed with Frontend Fallback.")
+        raise ValueError("V0_API_KEY is missing.")
         
-    base = os.getenv("V0_API_BASE", "https://api.v0.dev")
-    url = f"{base}/generate"
+    base = os.getenv("V0_API_BASE", "https://api.v0.dev") 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    
+    # Strategy 1: /generate (Custom/Unofficial common pattern)
+    url = f"{base}/generate"
     payload = {
         "task": "frontend_only", 
         "stack": "react+tailwind", 
         "prompt": prompt
     }
     
+    # Strategy 2: /chat/completions (OpenAI Compatible)
+    url_chat = f"{base}/chat/completions"
+    payload_chat = {
+        "model": "v0-preview",
+        "messages": [
+            {"role": "system", "content": "You are a frontend generator. Output JSON with 'files' key."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
+    }
+
     try:
+        # Try Strategy 1
         resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code == 404:
+             # Try Strategy 2
+             resp = requests.post(url_chat, headers=headers, json=payload_chat, timeout=60)
+        
         resp.raise_for_status()
         data = resp.json()
-        return data.get("files", {})
+        
+        # Handle response format variation
+        if "files" in data:
+            return data["files"]
+        elif "choices" in data:
+            text = data["choices"][0]["message"]["content"]
+            parsed = _parse_json_garbage(text)
+            return parsed.get("files", parsed)
+        else:
+            raise ValueError(f"Unknown v0 response format: {data.keys()}")
+
     except Exception as e:
+        # Final attempt to parse if valid JSON even if error? No.
         raise RuntimeError(f"v0 API Call Failed: {str(e)}")
 
 
 # ==============================================================================
-# HELPERS (Internal)
+# HELPERS
 # ==============================================================================
 
 def _call_gemini_text(prompt: str, model: str) -> str:
@@ -140,39 +218,34 @@ def _call_gemini_text(prompt: str, model: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key: return "graph TD; Error-->NoKey;"
     
-    url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        if not resp.ok: return "graph TD; Error-->API_Fail;"
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if not resp.ok: 
+            return f"graph TD; Error-->API_{resp.status_code};"
         data = resp.json()
-        text = data.get("candidates", [])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        return text
-    except:
-        return "graph TD; Error-->Exception;"
+        return data.get("candidates", [])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+    except Exception as e:
+        return f"graph TD; Error-->{str(e).replace(' ', '_')};"
+
 
 def _parse_json_garbage(text: str) -> Dict[str, Any]:
-    """
-    Cleans up LLM markdown garbage to extract JSON.
-    """
     text = text.strip()
-    # Remove markdown fences
     if text.startswith("```"):
-        import re
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
     
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Try finding { ... }
-        import re
         match = re.search(r"(\{.*\})", text, re.DOTALL)
         if match:
-            try:
-                return json.loads(match.group(1))
-            except:
-                pass
-        raise ValueError("Could not parse JSON from response.")
+            try: return json.loads(match.group(1))
+            except: pass
+        # Last ditch: fix common errors?
+        pass
+    
+    raise ValueError(f"Could not parse JSON. Preview: {text[:200]}...")

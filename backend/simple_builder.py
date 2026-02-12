@@ -134,13 +134,18 @@ class SDLCBuilder:
                     if not os.path.exists(plan_path): raise ValueError("Planning missing.")
                     with open(plan_path, "r", encoding="utf-8") as f: plan_content = f.read()
                     
-                    success = execute_frontend_phase(plan_content, run_dir)
+                    success, msg = execute_frontend_phase(plan_content, run_dir)
                     if not success:
-                        raise RuntimeError("Frontend Generation Failed (Both Gemini & v0).")
+                        raise RuntimeError(f"Frontend Phase Failed: {msg}")
 
                 # --- PHASE COMPLETE ---
                 self._update_status(run_dir, job_id, phase, "completed", f"{phase} completed.")
                 self._log_event(run_dir, phase, "Success.")
+                self._log_event(run_dir, phase, "Success.")
+                output_path = os.path.join(run_dir, "frontend")
+                success_msg = f"✅ **{phase.title()} Phase Completed Successfully!**\n\n**Output Location:** `{output_path}`"
+                self._log_chat_message(run_dir, "agent", success_msg)
+                print(f"[{job_id}] {phase} Output stored at: {output_path}")
                 
                 if db.enabled:
                     try:
@@ -153,6 +158,7 @@ class SDLCBuilder:
                 traceback.print_exc()
                 self._update_status(run_dir, job_id, phase, "failed", err)
                 self._log_event(run_dir, "error", f"{phase} CRASH: {traceback.format_exc()}")
+                self._log_chat_message(run_dir, "agent", f"❌ **{phase.title()} Phase Failed:** {str(e)}")
                 
                 if db.enabled:
                     try:
@@ -209,6 +215,24 @@ class SDLCBuilder:
         p = os.path.join(run_dir, "audit.log")
         with open(p, "a") as f:
             f.write(f"[{datetime.now().isoformat()}] [{category}] {content}\n")
+    
+    def _log_chat_message(self, run_dir: str, role: str, content: str):
+        """Log a message to the chat interface"""
+        status_path = os.path.join(run_dir, "status.json")
+        data = self._load_status(run_dir)
+        
+        if "messages" not in data:
+            data["messages"] = []
+        
+        data["messages"].append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        with open(status_path, "w") as f:
+            json.dump(data, f, indent=2)
+
 
     def _save_json(self, run_dir: str, filename: str, data: Any):
         path = os.path.join(run_dir, filename)

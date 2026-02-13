@@ -19,6 +19,7 @@ try:
     from backend.phases.planning import execute_planning_phase
     from backend.phases.design import execute_design_phase
     from backend.phases.frontend import execute_frontend_phase
+    from backend.phases.backend import execute_backend_phase
 except ImportError:
     # Fallback if running from backend dir directly
     try:
@@ -26,12 +27,14 @@ except ImportError:
         from phases.planning import execute_planning_phase
         from phases.design import execute_design_phase
         from phases.frontend import execute_frontend_phase
+        from phases.backend import execute_backend_phase
     except ImportError:
          # Relative import attempt
         from .phases.requirements import execute_requirements_phase
         from .phases.planning import execute_planning_phase
         from .phases.design import execute_design_phase
         from .phases.frontend import execute_frontend_phase
+        from .phases.backend import execute_backend_phase
 
 class SDLCBuilder:
     """
@@ -41,6 +44,8 @@ class SDLCBuilder:
     2. Planning (Mistral)
     3. Design (Mermaid)
     4. Frontend (Gemini -> v0)
+    4. Frontend (Gemini -> v0)
+    5. Backend (Gemini)
     STOP.
     """
 
@@ -88,7 +93,7 @@ class SDLCBuilder:
             return {"status": "failed", "error": "No prompt provided"}
 
         # Define Strict Phase Order
-        phases = ["requirements", "planning", "design", "frontend"]
+        phases = ["requirements", "planning", "design", "frontend", "backend"]
         
         self._log_event(run_dir, "system", f"Build triggered: {prompt}")
         if db.enabled:
@@ -138,6 +143,16 @@ class SDLCBuilder:
                     if not success:
                         raise RuntimeError(f"Frontend Phase Failed: {msg}")
 
+                elif phase == "backend":
+                    # Load planning artifact
+                    plan_path = os.path.join(run_dir, "planning.md")
+                    if not os.path.exists(plan_path): raise ValueError("Planning missing.")
+                    with open(plan_path, "r", encoding="utf-8") as f: plan_content = f.read()
+                    
+                    success, msg = execute_backend_phase(plan_content, run_dir)
+                    if not success:
+                        raise RuntimeError(f"Backend Phase Failed: {msg}")
+
                 # --- PHASE COMPLETE ---
                 self._update_status(run_dir, job_id, phase, "completed", f"{phase} completed.")
                 self._log_event(run_dir, phase, "Success.")
@@ -169,8 +184,8 @@ class SDLCBuilder:
                 return {"status": "failed", "error": err}
 
         # STOP Condition
-        self._update_status(run_dir, job_id, "complete", "completed", "All 4 phases completed. Backend/Tests disabled.")
-        return {"status": "completed", "summary": "Frontend Build Successful"}
+        self._update_status(run_dir, job_id, "complete", "completed", "All 5 phases completed.")
+        return {"status": "completed", "summary": "Full Stack Build Successful"}
 
     # --- HELPERS ---
 

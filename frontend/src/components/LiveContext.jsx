@@ -10,7 +10,7 @@ export default function LiveContext({ status, onSwitchTab }) {
         { id: 'planning', label: '2. Planning', icon: Map },
         { id: 'design', label: '3. System Design', icon: Map },
         { id: 'frontend', label: '4. Frontend Generation', icon: Terminal },
-        { id: 'backend', label: '5. Backend Generation (Disabled)', icon: Terminal },
+        { id: 'backend', label: '5. Backend Generation', icon: Terminal },
         { id: 'tests', label: '6. Testing (Disabled)', icon: CheckCircle },
         { id: 'deployment', label: '7. Deployment Prep (Disabled)', icon: CheckCircle },
     ];

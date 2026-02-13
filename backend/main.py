@@ -538,7 +538,8 @@ def sdlc_status(job_id: Optional[str] = None):
         "messages": job.get("messages", []),
         "flowchart": job.get("flowchart"),
         "providers_history": job.get("providers_history", []),
-        "test_report": job.get("test_report")
+        "test_report": job.get("test_report"),
+        "run_dir": job.get("run_dir")
     }
         
 

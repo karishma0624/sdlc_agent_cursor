@@ -2,10 +2,48 @@ import React, { useState, useEffect } from 'react';
 import { Menu, Plus, MessageSquare, Clock, Settings, User, Bot, Trash2 } from 'lucide-react';
 
 export default function Layout({ children, onNewSession, sessions, currentSessionId, onSelectSession }) {
+    const [showNewProjectModal, setShowNewProjectModal] = useState(false);
     const [sidebarOpen, setSidebarOpen] = useState(true);
 
     return (
         <div className="flex h-screen w-screen bg-background-dark text-slate-100 font-display overflow-hidden m-0 p-0" style={{ maxWidth: '100vw', width: '100vw' }}>
+            {/* New Project Modal */}
+            {showNewProjectModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setShowNewProjectModal(false)}>
+                    <div className="bg-surface-dark border border-border-dark p-6 rounded-xl shadow-2xl w-96 transform scale-100 transition-all" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-lg font-bold text-white mb-4">Create New Project</h3>
+                        <div className="grid grid-cols-2 gap-4">
+                            <button
+                                onClick={() => { onNewSession('web_app'); setShowNewProjectModal(false); }}
+                                className="flex flex-col items-center justify-center p-4 bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-lg transition-all group"
+                            >
+                                <div className="w-12 h-12 rounded-full bg-primary/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                                    <Bot className="w-6 h-6 text-primary" />
+                                </div>
+                                <span className="font-bold text-white">Web App</span>
+                                <span className="text-xs text-slate-400 mt-1">Full Stack SDLC</span>
+                            </button>
+                            <button
+                                onClick={() => { onNewSession('content'); setShowNewProjectModal(false); }}
+                                className="flex flex-col items-center justify-center p-4 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 rounded-lg transition-all group"
+                            >
+                                <div className="w-12 h-12 rounded-full bg-indigo-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                                    <MessageSquare className="w-6 h-6 text-indigo-400" />
+                                </div>
+                                <span className="font-bold text-white">Content</span>
+                                <span className="text-xs text-slate-400 mt-1">Text/Docs Only</span>
+                            </button>
+                        </div>
+                        <button
+                            onClick={() => setShowNewProjectModal(false)}
+                            className="mt-6 w-full py-2 text-slate-400 hover:text-white text-sm"
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* Sidebar */}
             <div className={`${sidebarOpen ? 'w-64' : 'w-0'} transition-all duration-300 bg-background-dark flex flex-col shrink-0 overflow-hidden`}>
                 <div className="p-5 border-b border-border-dark flex items-center gap-2">
@@ -17,7 +55,7 @@ export default function Layout({ children, onNewSession, sessions, currentSessio
 
                 <div className="p-2">
                     <button
-                        onClick={onNewSession}
+                        onClick={() => setShowNewProjectModal(true)}
                         className="w-full flex items-center justify-center gap-2 bg-primary hover:bg-primary-dark text-white py-2 px-3 rounded-lg font-medium transition-all shadow-lg shadow-primary/20 whitespace-nowrap text-sm"
                     >
                         <Plus className="w-4 h-4" />

@@ -1,6 +1,12 @@
 # backend/main.py
 
 import os
+import sys
+# Add parent dir to allow 'backend.research' imports even if running from inside backend
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Add current dir (backend) to allow 'services' imports from phases
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import json
 import threading
 import uuid
@@ -48,7 +54,8 @@ app.add_middleware(
 # -------------------------------------------------
 # AUTH
 # -------------------------------------------------
-pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+# Use pbkdf2_sha256 for maximum compatibility on Windows (no C-extensions required like bcrypt/argon2)
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # -------------------------------------------------
@@ -134,6 +141,14 @@ def register(user: UserCreate):
     )
     return {"message": "User registered"}
 
+# --- DEFAULT ADMIN USER ---
+if "admin" not in USERS:
+    USERS["admin"] = User(
+        username="admin", 
+        password_hash=get_password_hash("admin")
+    )
+# --------------------------
+
 
 @app.post("/token", response_model=Token)
 def login(form: OAuth2PasswordRequestForm = Depends()):
@@ -166,24 +181,45 @@ def health():
 # -------------------------------------------------
 # SDLC BUILD (REAL DETERMINISTIC)
 # -------------------------------------------------
-# -------------------------------------------------
-# SDLC BUILD (REAL DETERMINISTIC)
-# -------------------------------------------------
-from simple_builder import SDLCBuilder
+try:
+    from backend.simple_builder import SDLCBuilder
+    from backend.db import db
+except ImportError:
+    from simple_builder import SDLCBuilder
+    from db import db
 
+# Consolidate RUNS directory to be consistently inside 'PROJECT_ROOT/runs'
+# regardless of where the script is run from.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # .../backend
+ROOT_DIR = os.path.dirname(BASE_DIR) # .../
+RUNS_DIR_ABS = os.path.join(ROOT_DIR, "runs")
 
 JOBS_FILE = "jobs.json"
 _LOCK = threading.Lock()
-builder = SDLCBuilder(runs_dir="runs")
+# Initialize SDLCBuilder
+builder = SDLCBuilder(runs_dir=RUNS_DIR_ABS)
+
+# Initialize Research Wrapper (Metrics & Protection)
+try:
+    from backend.research.wrapper import ResearchWrapper
+    # Wrap standard builder with research features
+    builder = ResearchWrapper(builder)
+    print(f"[Research] Wrapper Enabled | Logging to: {RUNS_DIR_ABS}")
+except ImportError as e:
+    # This should be rare now with sys.path fix
+    print(f"[Research] ⚠️ Wrapper Failed to Load: {e}")
+    print("[Research] Running in Standard Mode (No Metrics)")
+except Exception as e:
+    print(f"[Research] ⚠️ Wrapper Initialization Error: {e}")
 
 def rebuild_jobs_from_disk() -> Dict[str, Dict[str, Any]]:
     """SCANS runs/ directory and rebuilds memory state from status.json files."""
     jobs = {}
-    if not os.path.exists("runs"):
+    if not os.path.exists(RUNS_DIR_ABS):
         return jobs
         
-    for dirname in os.listdir("runs"):
-        run_dir = os.path.join("runs", dirname)
+    for dirname in os.listdir(RUNS_DIR_ABS):
+        run_dir = os.path.join(RUNS_DIR_ABS, dirname)
         status_path = os.path.join(run_dir, "status.json")
         if os.path.isdir(run_dir) and os.path.exists(status_path):
             try:
@@ -211,6 +247,57 @@ def rebuild_jobs_from_disk() -> Dict[str, Dict[str, Any]]:
                 print(f"Skipping corrupt job {dirname}: {e}")
     return jobs
 
+# ... (skipped unchanged lines)
+
+# -------------------------------------------------
+# OPEN OUTPUT FOLDER
+# -------------------------------------------------
+class OpenFolderRequest(BaseModel):
+    path: str
+
+@app.post("/open-folder")
+def open_folder(req: OpenFolderRequest):
+    """Opens the specified folder in Windows Explorer"""
+    import subprocess
+    import platform
+    
+    try:
+        # 1. Try exact match
+        target_path = req.path
+        
+        # 2. If relative, try relative to RUNS directory
+        if not os.path.isabs(target_path):
+             potential = os.path.join(RUNS_DIR_ABS, os.path.basename(target_path))
+             if os.path.exists(potential):
+                 target_path = potential
+             else:
+                 # Try relative to CWD
+                 potential = os.path.abspath(target_path)
+                 if os.path.exists(potential):
+                     target_path = potential
+
+        if not os.path.exists(target_path):
+             # 3. Last ditch: check if it's a job ID
+             potential = os.path.join(RUNS_DIR_ABS, req.path)
+             if os.path.exists(potential):
+                 target_path = potential
+             else:
+                raise HTTPException(status_code=404, detail=f"Path not found: {req.path}")
+        
+        print(f"Opening folder: {target_path}")
+
+        # Open folder based on OS
+        if platform.system() == "Windows":
+            os.startfile(target_path)
+        elif platform.system() == "Darwin":  # macOS
+            subprocess.Popen(["open", target_path])
+        else:  # Linux
+            subprocess.Popen(["xdg-open", target_path])
+            
+        return {"success": True, "path": target_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 def load_jobs() -> Dict[str, Dict[str, Any]]:
     # Always rebuild from disk to be authoritative
     return rebuild_jobs_from_disk()
@@ -224,19 +311,25 @@ def save_jobs(jobs: Dict[str, Dict[str, Any]]):
 # Initial load
 _BUILD_JOBS: Dict[str, Dict[str, Any]] = rebuild_jobs_from_disk()
 
+class NewSessionRequest(BaseModel):
+    mode: Optional[str] = "auto" # 'web_app', 'content', 'auto'
+
 @app.post("/sessions/new")
-def new_session():
+def new_session(req: NewSessionRequest = NewSessionRequest()):
     job_id = uuid.uuid4().hex
     started_at = datetime.utcnow().isoformat()
+    mode = req.mode
+    
     # Create an 'idle' job entry. We don't create a run_dir yet until the first build.
     # OR better: create a placeholder dir so chat.json can exist immediately.
     # Let's create the dir to strictly follow "One Job = One Session" rule.
-    run_dir = builder.init_run("New Session", job_id=job_id)
+    run_dir = builder.init_run("New Session", job_id=job_id, mode=mode)
     
     with _LOCK:
         _BUILD_JOBS[job_id] = {
             "job_id": job_id,
             "status": "idle",
+            "mode": mode,
             "prompt": "New Session",
             "started_at": started_at,
             "finished_at": None,
@@ -262,7 +355,7 @@ def new_session():
             
         save_jobs(_BUILD_JOBS)
         
-    return {"job_id": job_id, "created_at": started_at, "status": "idle"}
+    return {"job_id": job_id, "created_at": started_at, "status": "idle", "mode": mode}
 
 class BuildRequest(BaseModel):
     prompt: Optional[str] = None
@@ -338,6 +431,7 @@ def chat_endpoint(req: ChatRequest):
 
 @app.post("/sdlc/build")
 def sdlc_build(req: BuildRequest):
+    # ... (existing logic)
     job_id = req.job_id
     
     with _LOCK:
@@ -433,6 +527,63 @@ def sdlc_build(req: BuildRequest):
         "started_at": current_job["started_at"],
         "run_dir": run_dir
     }
+
+# --- ALIAS FOR FRONTEND COMPATIBILITY ---
+@app.post("/api/sdlc/build")
+def api_sdlc_build(req: BuildRequest):
+    return sdlc_build(req)
+
+class PreviewRequest(BaseModel):
+    job_id: str
+
+@app.post("/sdlc/preview")
+def preview_endpoint(req: PreviewRequest):
+    """
+    Triggers npm run dev for the given job.
+    Returns the URL (e.g., http://localhost:5173).
+    """
+    result = builder.preview_frontend(req.job_id)
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=500, detail=result.get("error"))
+        
+    # As requested by the user: "when clicked on a button called preview ... and then the backed should get generated as well"
+    with _LOCK:
+        job = _BUILD_JOBS.get(req.job_id)
+        if job:
+            run_dir = job.get("run_dir")
+            def _trigger_backend():
+                try:
+                    status = builder._load_status(run_dir)
+                    if status.get("phases", {}).get("backend", "waiting") != "completed":
+                        builder._update_status(run_dir, req.job_id, "backend", "running", "Starting backend phase...")
+                        
+                        plan_path = os.path.join(run_dir, "planning.md")
+                        if not os.path.exists(plan_path): raise ValueError("Planning missing.")
+                        with open(plan_path, "r", encoding="utf-8") as f: plan_content = f.read()
+                        
+                        from backend.phases.backend import execute_backend_phase
+                        success, msg = execute_backend_phase(plan_content, run_dir)
+                        if not success:
+                            raise RuntimeError(f"Backend Phase Failed: {msg}")
+                            
+                        builder._update_status(run_dir, req.job_id, "backend", "completed", "backend completed.")
+                        builder._update_status(run_dir, req.job_id, "complete", "completed", "All phases completed.")
+                        success_msg = f"✅ **Backend Generated Immediately After Preview!**\n\nAPI available via `uvicorn backend.main:app`."
+                        builder._log_chat_message(run_dir, "agent", success_msg)
+                        
+                        if db.enabled:
+                            try:
+                                db.update_session_status(req.job_id, "backend", "completed")
+                                db.log_execution(req.job_id, "backend", "auto", True)
+                            except: pass
+                except Exception as e:
+                    builder._update_status(run_dir, req.job_id, "backend", "failed", str(e))
+                    builder._log_chat_message(run_dir, "agent", f"❌ **Backend Phase Failed:** {str(e)}")
+            
+            t = threading.Thread(target=_trigger_backend, daemon=True)
+            t.start()
+
+    return result
 
 @app.get("/runs")
 def list_runs():
@@ -532,6 +683,7 @@ def sdlc_status(job_id: Optional[str] = None):
 
     return {
         "run_id": job.get("job_id"),
+        "job_id": job.get("job_id"),
         "status": job.get("status"),
         "current_phase": job.get("current_phase", "planning"),
         "phases": job.get("phases", {}),
@@ -544,20 +696,46 @@ def sdlc_status(job_id: Optional[str] = None):
         
 
 
-@app.post("/open-folder")
-def open_folder(req: Dict[str, str]):
-    path = req.get("path")
-    if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Path not found")
+
+
+
+@app.get("/sdlc/report")
+def get_run_report(run_dir: str = ""):
+    """
+    Returns structured artifacts for the run.
+    """
+    if not run_dir or not os.path.exists(run_dir):
+        # Maybe job_id was passed?
+        # Try to find run_dir from job_id logic if empty?
+        # But frontend sends strict run_dir from status.
+        return {"artifacts": {}, "commands": {}}
+        
+    artifacts = {}
     
-    try:
-        if os.name == 'nt':
-            os.startfile(path)
-        elif os.name == 'posix':
-            subprocess.call(['open', path] if sys.platform == 'darwin' else ['xdg-open', path])
-        return {"status": "opened"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Check for basic artifacts
+    for f in ["requirements.md", "planning.md", "design/flowchart.mmd"]:
+        fp = os.path.join(run_dir, f)
+        if os.path.exists(fp):
+            artifacts[f] = fp
+
+    # Frontend
+    fe_path = os.path.join(run_dir, "frontend")
+    if os.path.exists(fe_path):
+        artifacts["frontend"] = [f for f in os.listdir(fe_path) if not f.startswith(".")]
+
+    # Backend 
+    be_path = os.path.join(run_dir, "backend")
+    if os.path.exists(be_path):
+        artifacts["backend"] = [f for f in os.listdir(be_path) if not f.startswith(".")]
+
+    return {
+        "summary": "Run Artifacts",
+        "artifacts": artifacts,
+        "commands": {
+            "frontend": ["npm install", "npm run dev"],
+            "backend": ["uvicorn backend.main:app --reload"]
+        }
+    }
 
 @app.delete("/runs/{job_id}")
 def delete_run(job_id: str):
@@ -594,39 +772,7 @@ def get_providers():
         }
     }
 
-# -------------------------------------------------
-# OPEN OUTPUT FOLDER
-# -------------------------------------------------
-class OpenFolderRequest(BaseModel):
-    path: str
 
-@app.post("/open-folder")
-def open_folder(req: OpenFolderRequest):
-    """Opens the specified folder in Windows Explorer"""
-    import subprocess
-    import platform
-    
-    try:
-        # Convert relative path to absolute
-        if not os.path.isabs(req.path):
-            abs_path = os.path.abspath(req.path)
-        else:
-            abs_path = req.path
-            
-        if not os.path.exists(abs_path):
-            raise HTTPException(status_code=404, detail=f"Path not found: {abs_path}")
-        
-        # Open folder based on OS
-        if platform.system() == "Windows":
-            subprocess.Popen(f'explorer "{abs_path}"')
-        elif platform.system() == "Darwin":  # macOS
-            subprocess.Popen(["open", abs_path])
-        else:  # Linux
-            subprocess.Popen(["xdg-open", abs_path])
-            
-        return {"success": True, "path": abs_path}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 # -------------------------------------------------
 # ROOT

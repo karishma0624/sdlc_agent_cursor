@@ -25,12 +25,22 @@ function App() {
   useEffect(() => { loadSessions(); }, [runId]);
 
   // Create new session
-  const handleNewSession = async () => {
-    const res = await fetch(`${API_BASE}/sessions/new`, { method: 'POST' });
-    const data = await res.json();
-    setRunId(data.job_id);
-    setActiveTab('chat');
-    loadSessions();
+  const handleNewSession = async (mode = 'auto') => {
+    try {
+      const res = await fetch(`${API_BASE}/sessions/new`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode })
+      });
+      if (!res.ok) throw new Error('Backend error');
+      const data = await res.json();
+      setRunId(data.job_id);
+      setActiveTab('chat');
+      loadSessions();
+    } catch (e) {
+      console.error(e);
+      alert("Failed to create session. Is the backend server running? Check terminal.");
+    }
   };
 
   // Poll for status to drive everything

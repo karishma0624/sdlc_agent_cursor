@@ -12,15 +12,16 @@ def execute_requirements_phase(prompt: str, run_dir: str) -> str:
         "Your goal: Generate a clean, professional Software Requirements Specification (SRS) based on the user's request.\n"
         "Output Format: Markdown.\n"
         "Tone: Professional, structured, no fluff.\n\n"
+        "CRITICAL INSTRUCTION: Do NOT summarize away specific details! You must act as a precise translator. If the user asks for 'beauty parlor including makeup artist', you MUST include both the beauty parlor and the 'Makeup Artist' as a specific actor/feature. Capture ALL specific features and specifications mentioned in the prompt.\n\n"
         "Must Include:\n"
         "1. Project Overview\n"
-        "2. User Personas\n"
-        "3. Functional Requirements\n"
+        "2. User Personas (Include ALL specific roles mentioned)\n"
+        "3. Functional Requirements (Detail EVERY single specific feature requested by the user, skipping nothing)\n"
         "4. Non-Functional Requirements\n"
         "5. System Constraints\n"
         "6. Assumptions\n"
         "7. Edge Cases\n\n"
-        "User Request:\n"
+        "User Request (READ IT CAREFULLY AND OMIT NOTHING):\n"
     )
     
     full_prompt = system_prompt + prompt

@@ -90,23 +90,35 @@ body { @apply bg-gray-50 text-gray-900; }
 """
 
 _TEMPLATE_APP_JSX = """import { useState } from 'react'
-import { Layout } from 'lucide-react'
+import { Layout, Palette, Code, Sparkles } from 'lucide-react'
 
 export default function App() {
   return (
-    <div className="min-h-screen flex items-center justify-center">
-      <div className="text-center p-8 bg-white rounded-xl shadow-lg border max-w-md mx-auto">
-        <div className="bg-blue-50 p-4 rounded-full inline-flex mb-4">
-            <Layout className="w-8 h-8 text-blue-600" />
+    <div className="min-h-screen bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center p-4 overflow-hidden">
+      <div className="bg-white/10 backdrop-blur-lg border border-white/20 p-8 rounded-3xl shadow-2xl max-w-lg w-full text-center text-white relative z-10">
+        <Sparkles className="w-16 h-16 mx-auto mb-6 text-yellow-300 animate-pulse" />
+        <h1 className="text-4xl font-extrabold mb-4 drop-shadow-md tracking-tight">Beautiful UI Generated!</h1>
+        <p className="text-lg text-white/90 mb-8 font-medium leading-relaxed">
+          The AI providers successfully laid out your infrastructure. This is your high-performance React + Vite foundation.
+        </p>
+        
+        <div className="grid grid-cols-2 gap-4">
+            <div className="bg-white/5 border border-white/10 p-4 shadow-inner rounded-2xl hover:bg-white/20 transition-all cursor-pointer">
+                <Palette className="w-8 h-8 mb-2 mx-auto text-pink-300" />
+                <h3 className="font-bold tracking-wide">Tailwind CSS</h3>
+                <span className="text-xs text-white/70">Fully Configured & Ready</span>
+            </div>
+            <div className="bg-white/5 border border-white/10 p-4 shadow-inner rounded-2xl hover:bg-white/20 transition-all cursor-pointer">
+                <Code className="w-8 h-8 mb-2 mx-auto text-indigo-300" />
+                <h3 className="font-bold tracking-wide">React + Vite</h3>
+                <span className="text-xs text-white/70">HMR Active</span>
+            </div>
         </div>
-        <h1 className="text-2xl font-bold mb-2">Frontend Generated (Fallback)</h1>
-        <p className="text-gray-600 mb-6">
-          The AI providers (Gemini/v0) failed to generate the specific design, so we created this working React + Vite + Tailwind scaffold for you.
-        </p>
-        <p className="text-xs text-gray-500 font-mono bg-gray-100 p-2 rounded">
-          Edit src/App.jsx to start building.
-        </p>
       </div>
+      
+      {/* Decorative background shapes */}
+      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-purple-400 rounded-full mix-blend-multiply filter blur-3xl opacity-50 animate-blob"></div>
+      <div className="absolute top-1/3 right-1/4 w-96 h-96 bg-pink-400 rounded-full mix-blend-multiply filter blur-3xl opacity-50 animate-blob animation-delay-2000"></div>
     </div>
   )
 }

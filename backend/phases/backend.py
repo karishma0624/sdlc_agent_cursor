@@ -26,29 +26,18 @@ def execute_backend_phase(planning_content: str, run_dir: str) -> tuple[bool, st
         "You are an expert backend developer. Generate a COMPLETE, PRODUCTION-READY FastAPI (Python) backend application.\n\n"
         f"IMPLEMENTATION PLAN:\n{planning_content[:3000]}\n\n"
         "STRICT REQUIREMENTS:\n"
-        "1. **Output Format**: ONLY valid JSON with this structure:\n"
-        "   {\"files\": {\"path/to/file.ext\": \"file content as string\", ...}}\n"
-        "2. **Tech Stack**: FastAPI, SQLAlchemy (SQLite), Pydantic\n"
-        "3. **Required Files** (MUST include ALL of these):\n"
-        "   - requirements.txt (fastapi, uvicorn, sqlalchemy, etc.)\n"
-        "   - app/main.py (FastAPI app, CORS, routes)\n"
-        "   - app/models.py (SQLAlchemy models based on plan)\n"
-        "   - app/schemas.py (Pydantic models)\n"
-        "   - app/database.py (SQLAlchemy setup)\n"
-        "   - app/crud.py (CRUD operations)\n"
-        "4. **Code Quality**:\n"
-        "   - Type hints everywhere\n"
-        "   - Docstrings for all endpoints\n"
-        "   - Correct relationships in models\n"
-        "   - No placeholders\n"
-        "5. **Output**: ONLY the JSON object. NO markdown code fences. NO explanations.\n\n"
-        "Generate the complete backend NOW:"
+        "1. **Output Format**: ONLY valid JSON. No markdown code blocks, no explanations. It must be a raw JSON object.\n"
+        "2. The JSON structure MUST be exactly:\n"
+        "   {\"files\": {\"requirements.txt\": \"content\", \"app/main.py\": \"content\", \"app/models.py\": \"content\", \"app/schemas.py\": \"content\", \"app/database.py\": \"content\"}}\n"
+        "3. **Tech Stack**: FastAPI, SQLAlchemy (SQLite), Pydantic\n"
+        "4. DO NOT use placeholders. Provide fully functional, complete files.\n\n"
+        "Return ONLY the JSON object. START your response with `{`."
     )
     
-    # Strict Order: Gemini only (v0 is frontend focused usually)
-    # But we can use the same pattern
+    # Strict Order: Gemini -> v0
     providers = [
-        ("Gemini", call_gemini)
+        ("Gemini", call_gemini),
+        ("v0", call_v0)
     ]
     
     last_error = ""

@@ -50,7 +50,7 @@ def call_mermaid(prompt: str, intent_context: Dict) -> str:
     if not os.getenv("GEMINI_API_KEY"):
         return "graph TD;\n    Error[Missing GEMINI_KEY]-->Stop;"
 
-    return _call_gemini_text(f"{prompt}\n\nContext: {json.dumps(intent_context)}", model="gemini-1.5-flash")
+    return call_gemini_text(f"{prompt}\n\nContext: {json.dumps(intent_context)}", model="gemini-1.5-flash")
 
 
 def _get_gemini_models(api_key: str) -> list[str]:
@@ -213,11 +213,15 @@ def call_v0(prompt: str) -> Dict[str, str]:
 # HELPERS
 # ==============================================================================
 
-def _call_gemini_text(prompt: str, model: str) -> str:
-    """Internal helper for text generation (used for Mermaid)"""
+def call_gemini_text(prompt: str, model: str = "gemini-1.5-flash") -> str:
+    """
+    Generic Gemini Text Generation.
+    Used for Intent Classification and Mermaid.
+    """
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key: return "graph TD; Error-->NoKey;"
+    if not api_key: return "Error: Missing GEMINI_API_KEY"
     
+    # Simple fallback model logic
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -225,11 +229,11 @@ def _call_gemini_text(prompt: str, model: str) -> str:
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=60)
         if not resp.ok: 
-            return f"graph TD; Error-->API_{resp.status_code};"
+            return f"Error: API_{resp.status_code} {resp.text}"
         data = resp.json()
         return data.get("candidates", [])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
     except Exception as e:
-        return f"graph TD; Error-->{str(e).replace(' ', '_')};"
+        return f"Error: {str(e)}"
 
 
 def _parse_json_garbage(text: str) -> Dict[str, Any]:

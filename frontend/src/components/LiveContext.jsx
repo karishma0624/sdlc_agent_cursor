@@ -2,6 +2,39 @@ import React from 'react';
 import { CheckCircle, Loader2, Circle, FileText, Map, Terminal, AlertCircle } from 'lucide-react';
 import Flowchart from './Flowchart';
 
+const PreviewButton = ({ jobId }) => {
+    const [loading, setLoading] = React.useState(false);
+
+    const handlePreview = async () => {
+        setLoading(true);
+        try {
+            const res = await fetch(`http://localhost:8000/sdlc/preview`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ job_id: jobId })
+            });
+            const data = await res.json();
+            if (data.url) window.open(data.url, '_blank');
+            else alert('Preview failed: ' + (data.error || 'Unknown error'));
+        } catch (e) {
+            alert('Preview error: ' + e.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <button
+            onClick={handlePreview}
+            disabled={loading}
+            style={{ backgroundColor: '#2563eb', padding: '2px 8px', borderRadius: '4px', border: '1px solid #3b82f6', color: 'white', fontSize: '10px', fontWeight: 'bold', marginLeft: '8px', cursor: loading ? 'not-allowed' : 'pointer', boxShadow: '0 0 10px rgba(59,130,246,0.5)', display: 'inline-flex', alignItems: 'center', gap: '4px', opacity: loading ? 0.7 : 1 }}
+        >
+            {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : '🚀'}
+            {loading ? 'Starting...' : 'Preview App'}
+        </button>
+    );
+};
+
 export default function LiveContext({ status, onSwitchTab }) {
     if (!status) return <div className="p-10 text-center text-slate-500">No active build context</div>;
 
@@ -30,7 +63,7 @@ export default function LiveContext({ status, onSwitchTab }) {
                     <div>
                         <h2 className="text-sm font-semibold text-white">Live Execution</h2>
                         <div className="flex items-center gap-2">
-                            <p className="text-xs text-slate-400 mt-1">/usr/projects/{status.run_id?.substring(0, 8)}</p>
+                            <p className="text-xs text-slate-400 mt-1">/usr/projects/{status.job_id?.substring(0, 8)}</p>
                             <button
                                 onClick={() => {
                                     fetch('http://localhost:8000/open-folder', {
@@ -43,6 +76,9 @@ export default function LiveContext({ status, onSwitchTab }) {
                             >
                                 Open Output
                             </button>
+                            {status.phases && status.phases.frontend === 'completed' && (
+                                <PreviewButton jobId={status.job_id} />
+                            )}
                         </div>
                     </div>
                     <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wide ${status.status === 'running' ? 'bg-primary/20 text-primary border border-primary/20 animate-pulse' :
@@ -64,120 +100,122 @@ export default function LiveContext({ status, onSwitchTab }) {
 
             {/* Phases List */}
             <div className="space-y-3">
-                {phases.map((phase, idx) => {
-                    const phaseStatus = status.phases && status.phases[phase.id];
-                    const isRunning = phaseStatus === 'running';
-                    const isCompleted = phaseStatus === 'completed';
-                    const isWaiting = !phaseStatus || phaseStatus === 'waiting';
-                    const isFailed = phaseStatus === 'failed';
+                {
+                    phases.map((phase, idx) => {
+                        const phaseStatus = status.phases && status.phases[phase.id];
+                        const isRunning = phaseStatus === 'running';
+                        const isCompleted = phaseStatus === 'completed';
+                        const isWaiting = !phaseStatus || phaseStatus === 'waiting';
+                        const isFailed = phaseStatus === 'failed';
 
-                    const providerInfo = status.providers_history?.find(h => h.phase === phase.id || (phase.id === 'tests' && h.phase === 'tests_gen'));
+                        const providerInfo = status.providers_history?.find(h => h.phase === phase.id || (phase.id === 'tests' && h.phase === 'tests_gen'));
 
-                    return (
-                        <div key={phase.id} className={`rounded-lg border transition-all duration-300 overflow-hidden ${isRunning ? 'border-primary bg-surface-dark shadow-[0_0_15px_-3px_rgba(43,108,238,0.15)] relative z-10' :
-                            isCompleted ? 'border-[#1e293b] bg-[#0f172a]' :
-                                'border-border-dark bg-background-dark/50 opacity-60'
-                            }`}>
-                            <div className={`p-4 flex items-center justify-between ${isCompleted ? 'bg-[#15803d]/10' : ''}`}>
-                                <div className="flex items-center gap-4">
-                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center border ${isRunning ? 'border-primary/30 border-t-primary animate-spin' :
-                                        isCompleted ? 'bg-[#15803d]/20 border-[#15803d]' :
-                                            'border-slate-700 bg-slate-800'
-                                        }`}>
-                                        {isRunning ? null :
-                                            isCompleted ? <CheckCircle className="w-4 h-4 text-[#4ade80]" /> :
-                                                <span className="text-xs text-slate-500 font-mono">{idx + 1}</span>
-                                        }
-                                    </div>
-                                    <div className="flex flex-col">
-                                        <span className={`text-sm font-semibold ${isCompleted ? 'text-slate-200' : isRunning ? 'text-white' : 'text-slate-500'}`}>
-                                            {phase.label}
-                                        </span>
-                                        {isRunning && <span className="text-[10px] text-primary animate-pulse font-mono mt-0.5">Executing...</span>}
-                                        {isCompleted && providerInfo && (
-                                            <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5 font-mono">
-                                                Generated by <span className="text-slate-300">{providerInfo.provider}</span>
-                                                <span className="text-slate-500">({providerInfo.model})</span>
+                        return (
+                            <div key={phase.id} className={`rounded-lg border transition-all duration-300 overflow-hidden ${isRunning ? 'border-primary bg-surface-dark shadow-[0_0_15px_-3px_rgba(43,108,238,0.15)] relative z-10' :
+                                isCompleted ? 'border-[#1e293b] bg-[#0f172a]' :
+                                    'border-border-dark bg-background-dark/50 opacity-60'
+                                }`}>
+                                <div className={`p-4 flex items-center justify-between ${isCompleted ? 'bg-[#15803d]/10' : ''}`}>
+                                    <div className="flex items-center gap-4">
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center border ${isRunning ? 'border-primary/30 border-t-primary animate-spin' :
+                                            isCompleted ? 'bg-[#15803d]/20 border-[#15803d]' :
+                                                'border-slate-700 bg-slate-800'
+                                            }`}>
+                                            {isRunning ? null :
+                                                isCompleted ? <CheckCircle className="w-4 h-4 text-[#4ade80]" /> :
+                                                    <span className="text-xs text-slate-500 font-mono">{idx + 1}</span>
+                                            }
+                                        </div>
+                                        <div className="flex flex-col">
+                                            <span className={`text-sm font-semibold ${isCompleted ? 'text-slate-200' : isRunning ? 'text-white' : 'text-slate-500'}`}>
+                                                {phase.label}
                                             </span>
-                                        )}
-                                    </div>
-                                </div>
-                                <span className={`text-[10px] font-bold px-3 py-1 rounded-full border capitalize tracking-wide ${isCompleted ? 'text-[#4ade80] bg-[#15803d]/20 border-[#15803d]/30 shadow-sm' :
-                                    isRunning ? 'text-primary bg-primary/10 border-primary/20 shadow-[0_0_10px_-2px_rgba(59,130,246,0.5)]' :
-                                        'text-slate-600 bg-slate-800/50 border-transparent'
-                                    }`}>
-                                    {phaseStatus || 'Waiting'}
-                                </span>
-                            </div>
-
-                            {/* Artifact Previews - Dark Box Design */}
-                            {
-                                isCompleted && phase.id === 'planning' && (
-                                    <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left">
-                                        <div className="flex items-center gap-2 mb-1">
-                                            <FileText className="w-3 h-3 text-slate-400" />
-                                            <span className="text-xs text-slate-300 font-medium">Planning.json</span>
-                                        </div>
-                                        <div className="text-[10px] font-mono text-slate-500 truncate pl-5">
-                                            Requirements analysis completed and stored.
-                                        </div>
-                                    </div>
-                                )
-                            }
-
-                            {
-                                isCompleted && phase.id === 'design' && status.flowchart && (
-                                    <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left">
-                                        <div className="flex items-center gap-2 mb-2">
-                                            <Map className="w-3 h-3 text-slate-400" />
-                                            <span className="text-xs text-slate-300 font-medium">Architecture.mmd</span>
-                                        </div>
-                                        <Flowchart chart={status.flowchart} />
-                                    </div>
-                                )
-                            }
-
-                            {
-                                isCompleted && phase.id === 'backend' && (
-                                    <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left">
-                                        <div className="flex items-center gap-2 mb-1">
-                                            <Terminal className="w-3 h-3 text-slate-400" />
-                                            <span className="text-xs text-slate-300 font-medium">Backend Generated</span>
-                                        </div>
-                                        <div className="text-[10px] font-mono text-slate-500 truncate pl-5">
-                                            FastAPI/Python structure created.
-                                        </div>
-                                    </div>
-                                )
-                            }
-
-                            {
-                                isCompleted && phase.id === 'tests' && status.test_report && (
-                                    <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left font-mono text-xs">
-                                        <div className="flex gap-4 mb-1">
-                                            <div className="flex items-center gap-1 text-[#4ade80]">
-                                                <CheckCircle className="w-3 h-3" />
-                                                <span>Passed: {status.test_report.passed}</span>
-                                            </div>
-                                            {status.test_report.failed > 0 && (
-                                                <div className="flex items-center gap-1 text-red-400">
-                                                    <AlertCircle className="w-3 h-3" />
-                                                    <span>Failed: {status.test_report.failed}</span>
-                                                </div>
+                                            {isRunning && <span className="text-[10px] text-primary animate-pulse font-mono mt-0.5">Executing...</span>}
+                                            {isCompleted && providerInfo && (
+                                                <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5 font-mono">
+                                                    Generated by <span className="text-slate-300">{providerInfo.provider}</span>
+                                                    <span className="text-slate-500">({providerInfo.model})</span>
+                                                </span>
                                             )}
                                         </div>
-                                        {status.test_report.error && (
-                                            <div className="text-error mt-1">{status.test_report.error}</div>
-                                        )}
                                     </div>
-                                )
-                            }
-                        </div>
-                    );
-                })}
-            </div>
+                                    <span className={`text-[10px] font-bold px-3 py-1 rounded-full border capitalize tracking-wide ${isCompleted ? 'text-[#4ade80] bg-[#15803d]/20 border-[#15803d]/30 shadow-sm' :
+                                        isRunning ? 'text-primary bg-primary/10 border-primary/20 shadow-[0_0_10px_-2px_rgba(59,130,246,0.5)]' :
+                                            'text-slate-600 bg-slate-800/50 border-transparent'
+                                        }`}>
+                                        {phaseStatus || 'Waiting'}
+                                    </span>
+                                </div>
+
+                                {/* Artifact Previews - Dark Box Design */}
+                                {
+                                    isCompleted && phase.id === 'planning' && (
+                                        <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <FileText className="w-3 h-3 text-slate-400" />
+                                                <span className="text-xs text-slate-300 font-medium">Planning.json</span>
+                                            </div>
+                                            <div className="text-[10px] font-mono text-slate-500 truncate pl-5">
+                                                Requirements analysis completed and stored.
+                                            </div>
+                                        </div>
+                                    )
+                                }
+
+                                {
+                                    isCompleted && phase.id === 'design' && status.flowchart && (
+                                        <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left">
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <Map className="w-3 h-3 text-slate-400" />
+                                                <span className="text-xs text-slate-300 font-medium">Architecture.mmd</span>
+                                            </div>
+                                            <Flowchart chart={status.flowchart} />
+                                        </div>
+                                    )
+                                }
+
+                                {
+                                    isCompleted && phase.id === 'backend' && (
+                                        <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <Terminal className="w-3 h-3 text-slate-400" />
+                                                <span className="text-xs text-slate-300 font-medium">Backend Generated</span>
+                                            </div>
+                                            <div className="text-[10px] font-mono text-slate-500 truncate pl-5">
+                                                FastAPI/Python structure created.
+                                            </div>
+                                        </div>
+                                    )
+                                }
+
+                                {
+                                    isCompleted && phase.id === 'tests' && status.test_report && (
+                                        <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left font-mono text-xs">
+                                            <div className="flex gap-4 mb-1">
+                                                <div className="flex items-center gap-1 text-[#4ade80]">
+                                                    <CheckCircle className="w-3 h-3" />
+                                                    <span>Passed: {status.test_report.passed}</span>
+                                                </div>
+                                                {status.test_report.failed > 0 && (
+                                                    <div className="flex items-center gap-1 text-red-400">
+                                                        <AlertCircle className="w-3 h-3" />
+                                                        <span>Failed: {status.test_report.failed}</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            {status.test_report.error && (
+                                                <div className="text-error mt-1">{status.test_report.error}</div>
+                                            )}
+                                        </div>
+                                    )
+                                }
+                            </div>
+                        );
+                    })
+                }
+            </div >
             {/* Live Terminal */}
-            <div className="rounded-xl border border-border-dark bg-[#0d1117] overflow-hidden flex flex-col shrink-0 mt-4">
+            < div className="rounded-xl border border-border-dark bg-[#0d1117] overflow-hidden flex flex-col shrink-0 mt-4" >
                 <div className="flex items-center justify-between px-4 py-2 border-b border-border-dark bg-surface-dark">
                     <div className="flex items-center gap-2">
                         <Terminal className="w-4 h-4 text-slate-400" />
@@ -202,7 +240,7 @@ export default function LiveContext({ status, onSwitchTab }) {
                         <div className="text-slate-600 italic">Waiting for logs...</div>
                     )}
                 </div>
-            </div>
+            </div >
         </div >
     );
 }

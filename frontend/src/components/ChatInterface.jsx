@@ -102,6 +102,44 @@ export default function ChatInterface({ runId, setRunId, status }) {
     return (
         <div className="flex flex-col h-full bg-background-dark">
             <div className="flex-1 overflow-y-auto p-4 space-y-6 pb-20 scroll-smooth">
+                {/* Project Actions Toolbar */}
+                {status && status.phases && status.phases.frontend === 'completed' && (
+                    <div className="flex justify-center mb-4 animate-fade-in-down">
+                        <div className="bg-surface-dark border border-primary/30 rounded-full px-4 py-2 flex items-center gap-3 shadow-lg shadow-primary/10">
+                            <span className="text-xs font-bold text-primary">Build Successful</span>
+                            <div className="h-4 w-px bg-slate-700"></div>
+                            {/* We re-used PreviewButton equivalent logic here to ensure loading state */}
+                            <button
+                                onClick={async (e) => {
+                                    const btn = e.currentTarget;
+                                    const originalText = btn.innerHTML;
+                                    btn.innerHTML = `<span class="flex items-center gap-1"><svg class="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24"><path fill="none" class="opacity-25" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" fill="currentColor"></path></svg>Starting...</span>`;
+                                    btn.disabled = true;
+                                    try {
+                                        const res = await fetch(`http://localhost:8000/sdlc/preview`, {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ job_id: runId })
+                                        });
+                                        const data = await res.json();
+                                        if (data.url) window.open(data.url, '_blank');
+                                        else alert('Preview failed: ' + (data.error || 'Unknown error'));
+                                    } catch (e) {
+                                        alert('Preview error: ' + e.message);
+                                    } finally {
+                                        btn.innerHTML = originalText;
+                                        btn.disabled = false;
+                                    }
+                                }}
+                                className="flex items-center gap-1.5 text-xs font-bold text-white hover:text-primary transition-colors disabled:opacity-50"
+                            >
+                                <Globe className="w-3.5 h-3.5" />
+                                Preview App
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 {/* Date Separator */}
                 <div className="flex justify-center">
                     <span className="text-[10px] font-mono text-slate-500 bg-surface-dark px-3 py-1 rounded-full border border-border-dark">

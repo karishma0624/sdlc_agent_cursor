@@ -1,0 +1,139 @@
+Here's a simple Todo List app using HTML, CSS, and JavaScript:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Todo List App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+        }
+        .todo-form {
+            display: flex;
+            margin-bottom: 20px;
+        }
+        .todo-input {
+            flex-grow: 1;
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 4px 0 0 4px;
+        }
+        .todo-button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 0 4px 4px 0;
+            cursor: pointer;
+        }
+        .todo-button:hover {
+            background-color: #45a049;
+        }
+        .todo-list {
+            list-style-type: none;
+            padding: 0;
+        }
+        .todo-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .todo-item.completed {
+            text-decoration: line-through;
+            color: #888;
+        }
+        .todo-text {
+            flex-grow: 1;
+        }
+        .todo-actions {
+            display: flex;
+            gap: 10px;
+        }
+        .complete-btn {
+            background-color: #2196F3;
+        }
+        .complete-btn:hover {
+            background-color: #0b7dda;
+        }
+        .delete-btn {
+            background-color: #f44336;
+        }
+        .delete-btn:hover {
+            background-color: #da190b;
+        }
+    </style>
+</head>
+<body>
+    <h1>Todo List</h1>
+    <div class="todo-form">
+        <input type="text" class="todo-input" placeholder="Add a new task...">
+        <button class="todo-button">Add</button>
+    </div>
+    <ul class="todo-list"></ul>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const todoInput = document.querySelector('.todo-input');
+            const todoButton = document.querySelector('.todo-button');
+            const todoList = document.querySelector('.todo-list');
+
+            todoButton.addEventListener('click', addTodo);
+            todoInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    addTodo();
+                }
+            });
+
+            function addTodo() {
+                const todoText = todoInput.value.trim();
+                if (todoText) {
+                    const todoItem = document.createElement('li');
+                    todoItem.className = 'todo-item';
+
+                    const todoTextElement = document.createElement('span');
+                    todoTextElement.className = 'todo-text';
+                    todoTextElement.textContent = todoText;
+
+                    const completeButton = document.createElement('button');
+                    completeButton.className = 'complete-btn todo-actions';
+                    completeButton.textContent = 'Complete';
+                    completeButton.addEventListener('click', function() {
+                        todoItem.classList.toggle('completed');
+                    });
+
+                    const deleteButton = document.createElement('button');
+                    deleteButton.className = 'delete-btn todo-actions';
+                    deleteButton.textContent = 'Delete';
+                    deleteButton.addEventListener('click', function() {
+                        todoItem.remove();
+                    });
+
+                    const actionsDiv = document.createElement('div');
+                    actionsDiv.className = 'todo-actions';
+                    actionsDiv.appendChild(completeButton);
+                    actionsDiv.appendChild(deleteButton);
+
+                    todoItem.appendChild(todoTextElement);
+                    todoItem.appendChild(actionsDiv);
+                    todoList.appendChild(todoItem);
+
+                    todoInput.value = '';
+                    todoInput.focus();
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+```

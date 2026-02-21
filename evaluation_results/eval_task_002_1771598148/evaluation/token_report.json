@@ -1,0 +1,10 @@
+{
+  "usage": {
+    "mistral": 0,
+    "gemini": 0,
+    "v0": 0,
+    "total_estimated_cost": 0.0
+  },
+  "breakdown_by_model": [],
+  "cost_analysis": "$0.0000"
+}

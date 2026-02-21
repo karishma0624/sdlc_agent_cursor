@@ -1,0 +1,130 @@
+[
+  {
+    "task": "Simple Calculator",
+    "mode": "baseline",
+    "metrics": {
+      "success": true,
+      "execution_time": 21.774998664855957,
+      "iterations": 1,
+      "phases": {
+        "baseline": {
+          "status": "completed"
+        }
+      }
+    }
+  },
+  {
+    "task": "Simple Calculator",
+    "mode": "agent",
+    "metrics": {
+      "task_id": "eval_task_001_1771598134",
+      "repo_name": "unknown",
+      "success": true,
+      "failure_category": null,
+      "iterations": 0,
+      "recovery_attempts": 0,
+      "execution_time": 3.2989001274108887,
+      "commands_executed": [],
+      "tests_total": 0,
+      "tests_passed": 0,
+      "static_errors_before": 0,
+      "static_errors_after": 0,
+      "token_usage": {
+        "mistral": 0,
+        "gemini": 0,
+        "v0": 0,
+        "total_estimated_cost": 0.0
+      },
+      "model_used": [],
+      "memory_used_mb": 70.33984375,
+      "sandbox_violations": 0,
+      "blocked_commands": 0,
+      "human_intervention": false,
+      "project_size_files": 19,
+      "lines_of_code": 301,
+      "timestamp": "2026-02-20T20:05:35.757898",
+      "phases": {
+        "mistral_call": {
+          "start_time": 1771598137.7312598,
+          "status": "running"
+        },
+        "mermaid_call": {
+          "start_time": 1771598138.0702865,
+          "status": "running"
+        },
+        "gemini_call": {
+          "start_time": 1771598138.6814332,
+          "status": "running"
+        },
+        "v0_call": {
+          "start_time": 1771598138.3549612,
+          "status": "running"
+        }
+      }
+    }
+  },
+  {
+    "task": "Todo List",
+    "mode": "baseline",
+    "metrics": {
+      "success": true,
+      "execution_time": 9.62778925895691,
+      "iterations": 1,
+      "phases": {
+        "baseline": {
+          "status": "completed"
+        }
+      }
+    }
+  },
+  {
+    "task": "Todo List",
+    "mode": "agent",
+    "metrics": {
+      "task_id": "eval_task_002_1771598148",
+      "repo_name": "unknown",
+      "success": true,
+      "failure_category": null,
+      "iterations": 0,
+      "recovery_attempts": 0,
+      "execution_time": 2.994711399078369,
+      "commands_executed": [],
+      "tests_total": 0,
+      "tests_passed": 0,
+      "static_errors_before": 0,
+      "static_errors_after": 0,
+      "token_usage": {
+        "mistral": 0,
+        "gemini": 0,
+        "v0": 0,
+        "total_estimated_cost": 0.0
+      },
+      "model_used": [],
+      "memory_used_mb": 71.6015625,
+      "sandbox_violations": 0,
+      "blocked_commands": 0,
+      "human_intervention": false,
+      "project_size_files": 19,
+      "lines_of_code": 301,
+      "timestamp": "2026-02-20T20:05:49.128884",
+      "phases": {
+        "mistral_call": {
+          "start_time": 1771598150.7957852,
+          "status": "running"
+        },
+        "mermaid_call": {
+          "start_time": 1771598151.1373715,
+          "status": "running"
+        },
+        "gemini_call": {
+          "start_time": 1771598151.7883708,
+          "status": "running"
+        },
+        "v0_call": {
+          "start_time": 1771598151.4363105,
+          "status": "running"
+        }
+      }
+    }
+  }
+]

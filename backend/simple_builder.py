@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from services.adapters import InferenceRouter
+import services.supabase_client as supa
 
 class SDLCBuilder:
     """
@@ -35,38 +36,41 @@ class SDLCBuilder:
         os.makedirs(run_dir, exist_ok=True)
         return run_dir
 
-    def run_build(self, run_dir: str, prompt: str) -> Dict[str, Any]:
+    def run_build(
+        self,
+        run_dir: str,
+        prompt: str,
+        supabase_session_id: Optional[str] = None,
+        supabase_project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Main entry point. Resumes from the last successful state.
+        Automatically persists events to Supabase if session/project IDs are provided.
         """
         job_id = os.path.basename(run_dir)
         status = self._load_status(run_dir)
-        
+
         # PERSIST PROMPT for Session Names
         if prompt and prompt.strip():
             status["prompt"] = prompt
             self._save_json(run_dir, "status.json", status)
-        
+
         # Define Phase Order
         phases = ["planning", "design", "backend", "frontend", "tests", "deployment"]
-        
-        # Update prompt if provided
         self._log_event(run_dir, "system", f"Build triggered: {prompt}")
 
+        iteration = 1
         for phase in phases:
             current_phase_status = status.get("phases", {}).get(phase, "waiting")
-            
+
             # Skip if already completed
             if current_phase_status == "completed":
+                iteration += 1
                 continue
-            
-            # Stop if the previous phase failed (unless we are retrying this one)
-            # Actually, the loop naturally proceeds. If we find a 'failed' or 'waiting' phase, we try to run it.
-            # But we must ensure dependencies exist.
-            
+
             try:
                 self._update_status(run_dir, job_id, phase, "running", f"Starting {phase} phase...")
-                
+
                 # Execute Phase
                 if phase == "planning":
                     self._phase_planning(prompt, run_dir)
@@ -80,21 +84,80 @@ class SDLCBuilder:
                     self._phase_tests(run_dir)
                 elif phase == "deployment":
                     self._phase_deployment(run_dir)
-                
+
                 self._update_status(run_dir, job_id, phase, "completed", f"{phase} completed successfully.")
-                
+
+                # --- Supabase: log successful phase ---
+                if supabase_session_id:
+                    supa.save_execution_log(
+                        session_id=supabase_session_id,
+                        phase=phase,
+                        success=True,
+                        iteration=iteration,
+                    )
+                    supa.update_session(
+                        session_id=supabase_session_id,
+                        current_phase=phase,
+                        iteration_count=iteration,
+                    )
+
                 # Refresh status for next loop iteration
                 status = self._load_status(run_dir)
-                
+                iteration += 1
+
             except Exception as e:
                 err_msg = f"{phase} failed: {str(e)}"
                 traceback.print_exc()
                 self._update_status(run_dir, job_id, phase, "failed", err_msg)
                 self._log_event(run_dir, "error", traceback.format_exc())
+
+                # --- Supabase: log failed phase ---
+                if supabase_session_id:
+                    supa.save_execution_log(
+                        session_id=supabase_session_id,
+                        phase=phase,
+                        success=False,
+                        error_output=err_msg,
+                        iteration=iteration,
+                    )
+                    supa.update_session(
+                        session_id=supabase_session_id,
+                        status="failed",
+                        current_phase=phase,
+                    )
+
                 return {"status": "failed", "error": err_msg}
 
         self._update_status(run_dir, job_id, "complete", "completed", "All phases executed successfully.")
-        return {"status": "completed", "summary": "Build successful"}
+
+        # --- Supabase: build done — save assistant message + RAG summary ---
+        summary_text = (
+            f"Build completed successfully for prompt: '{prompt}'. "
+            f"All 6 SDLC phases executed: planning, design, backend, frontend, tests, deployment."
+        )
+        if supabase_session_id:
+            supa.save_message(
+                session_id=supabase_session_id,
+                role="assistant",
+                content=summary_text,
+            )
+            supa.update_session(
+                session_id=supabase_session_id,
+                status="completed",
+                current_phase="deployment",
+                iteration_count=iteration,
+            )
+            if supabase_project_id:
+                supa.save_rag_summary(
+                    project_id=supabase_project_id,
+                    session_id=supabase_session_id,
+                    prompt=prompt,
+                    summary=summary_text,
+                    status="completed",
+                    iteration=iteration,
+                )
+
+        return {"status": "completed", "summary": summary_text}
 
     # ------------------------------------------------------------------
     # PHASES
@@ -304,23 +367,33 @@ class SDLCBuilder:
         # A simple append-only log specific to the build
         pass # covered by status.json execution_log mostly
 
-    def _log_usage(self, run_dir: str, phase: str, res: Dict):
+    def _log_usage(self, run_dir: str, phase: str, res: Dict, supabase_session_id: Optional[str] = None):
         path = os.path.join(run_dir, "providers_used.json")
         history = []
         if os.path.exists(path):
-            try: 
+            try:
                 with open(path, "r") as f: history = json.load(f).get("history", [])
             except: pass
-        
+
         history.append({
             "phase": phase,
             "provider": res.get("provider", "unknown"),
             "model": res.get("model", "unknown"),
             "timestamp": datetime.now().isoformat()
         })
-        
+
         with open(path, "w") as f:
             json.dump({"history": history}, f, indent=2)
+
+        # --- Supabase: provider usage ---
+        if supabase_session_id:
+            supa.save_provider_usage(
+                session_id=supabase_session_id,
+                provider_name=res.get("provider", "unknown"),
+                model_name=res.get("model"),
+                phase=phase,
+                success=True,
+            )
 
     def _save_json(self, run_dir: str, filename: str, data: Any):
         path = os.path.join(run_dir, filename)

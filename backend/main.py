@@ -14,6 +14,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import services.supabase_client as supa
 
 # -------------------------------------------------
 # ENV
@@ -223,11 +224,21 @@ _BUILD_JOBS: Dict[str, Dict[str, Any]] = rebuild_jobs_from_disk()
 def new_session():
     job_id = uuid.uuid4().hex
     started_at = datetime.utcnow().isoformat()
-    # Create an 'idle' job entry. We don't create a run_dir yet until the first build.
-    # OR better: create a placeholder dir so chat.json can exist immediately.
-    # Let's create the dir to strictly follow "One Job = One Session" rule.
     run_dir = builder.init_run("New Session", job_id=job_id)
-    
+
+    # --- Supabase: create project + session row for this UI session ---
+    supa_project_id = supa.create_project(
+        name=f"Session {job_id[:8]}",
+        description="Autonomous SDLC Builder - new session",
+    )
+    supa_session_id = None
+    if supa_project_id:
+        supa_session_id = supa.create_session(
+            project_id=supa_project_id,
+            status="idle",
+            current_phase="planning",
+        )
+
     with _LOCK:
         _BUILD_JOBS[job_id] = {
             "job_id": job_id,
@@ -245,10 +256,13 @@ def new_session():
                 "deployment": "waiting"
             },
             "summary": None,
-            "error": None
+            "error": None,
+            # Supabase IDs — persisted in memory for this job lifetime
+            "supa_project_id": supa_project_id,
+            "supa_session_id": supa_session_id,
         }
         save_jobs(_BUILD_JOBS)
-        
+
     return {"job_id": job_id, "created_at": started_at, "status": "idle"}
 
 class BuildRequest(BaseModel):
@@ -263,41 +277,49 @@ class ChatRequest(BaseModel):
 def chat_endpoint(req: ChatRequest):
     """
     Handles follow-up chat messages.
-    1. Appends to chat.json
-    2. Triggers builder analysis (continuation)
+    1. Saves user message to Supabase
+    2. Appends to chat.json
+    3. Triggers builder analysis (continuation)
     """
     global _BUILD_JOBS
-    
+
     # Reload logic (Self-Healing)
     if req.job_id not in _BUILD_JOBS:
         _BUILD_JOBS = rebuild_jobs_from_disk()
-    
+
     job = _BUILD_JOBS.get(req.job_id)
     if not job:
-         raise HTTPException(status_code=404, detail="Job not found")
-         
+        raise HTTPException(status_code=404, detail="Job not found")
+
     run_dir = job["run_dir"]
-    
-    # 1. Persist User Message
+    supa_session_id = job.get("supa_session_id")
+    supa_project_id = job.get("supa_project_id")
+
+    # 1. Save user message to Supabase immediately
+    if supa_session_id:
+        supa.save_message(
+            session_id=supa_session_id,
+            role="user",
+            content=req.message,
+        )
+
+    # 2. Persist to local chat.json
     chat_path = os.path.join(run_dir, "chat.json")
     chat_log = []
     if os.path.exists(chat_path):
-        try: 
+        try:
             with open(chat_path, "r") as f: chat_log = json.load(f)
         except: pass
-        
+
     chat_log.append({"role": "user", "content": req.message, "timestamp": datetime.utcnow().isoformat()})
     with open(chat_path, "w") as f:
         json.dump(chat_log, f, indent=2)
-        
-    # 2. Trigger Builder (Continuation)
-    # We update status to 'running' and let the builder decide if it needs to code or just reply.
-    # For now, we assume every message is a 'Prompt' that might need code changes.
-    
+
+    # 3. Trigger Builder (Continuation)
     job["status"] = "running"
-    job["prompt"] = req.message # Update active prompt context
+    job["prompt"] = req.message
     job["status_message"] = "Analyzing request..."
-    
+
     # Sync to disk
     p = os.path.join(run_dir, "status.json")
     if os.path.exists(p):
@@ -305,16 +327,23 @@ def chat_endpoint(req: ChatRequest):
         d.update({"status": "running", "status_message": "Analyzing request..."})
         with open(p, "w") as f: json.dump(d, f)
 
-    def _run_continuation(job_id, run_dir, msg):
+    def _run_continuation(job_id, run_dir, msg, session_id, project_id):
         try:
-            builder.run_build(run_dir, msg)
-        except Exception as e:
-            # Error handling handled inside run_build usually, but safety net
+            builder.run_build(
+                run_dir, msg,
+                supabase_session_id=session_id,
+                supabase_project_id=project_id,
+            )
+        except Exception:
             pass
 
-    t = threading.Thread(target=_run_continuation, args=(req.job_id, run_dir, req.message), daemon=True)
+    t = threading.Thread(
+        target=_run_continuation,
+        args=(req.job_id, run_dir, req.message, supa_session_id, supa_project_id),
+        daemon=True,
+    )
     t.start()
-    
+
     return {"status": "processing", "job_id": req.job_id}
 
 @app.post("/sdlc/build")
@@ -344,41 +373,56 @@ def sdlc_build(req: BuildRequest):
 
         run_dir = current_job.get("run_dir")
         
-        # PERSIST CHAT
+        # PERSIST CHAT to local file
         if req.prompt:
             chat_path = os.path.join(run_dir, "chat.json")
             chat_log = []
             if os.path.exists(chat_path):
-                try: 
+                try:
                     with open(chat_path, "r") as f: chat_log = json.load(f)
                 except: pass
-            
+
             chat_log.append({"role": "user", "content": req.prompt, "timestamp": datetime.utcnow().isoformat()})
-            # We don't have the "agent" message yet, that comes from execution events.
-            # frontend poll will pick up status updates.
-            
             with open(chat_path, "w") as f:
                 json.dump(chat_log, f, indent=2)
+
+        # --- Supabase: save user message ---
+        supa_session_id = current_job.get("supa_session_id")
+        supa_project_id = current_job.get("supa_project_id")
+        if supa_session_id and req.prompt:
+            supa.save_message(
+                session_id=supa_session_id,
+                role="user",
+                content=req.prompt,
+            )
+            supa.update_session(
+                session_id=supa_session_id,
+                status="running",
+                current_phase="planning",
+            )
 
         # Update Job Status to Running
         current_job["status"] = "running"
         current_job["finished_at"] = None
         current_job["error"] = None
         if req.prompt:
-            current_job["prompt"] = req.prompt # Update context
+            current_job["prompt"] = req.prompt
         save_jobs(_BUILD_JOBS)
 
     # 3. Start Background Build
-    def _run_build(job_id: str, run_dir: str, prompt: str):
+    def _run_build(job_id: str, run_dir: str, prompt: str, session_id: Optional[str], project_id: Optional[str]):
         try:
-            # Execute actual build
             prompt_to_use = prompt or "Continue build"
-            result = builder.run_build(run_dir, prompt_to_use)
-            
+            result = builder.run_build(
+                run_dir,
+                prompt_to_use,
+                supabase_session_id=session_id,
+                supabase_project_id=project_id,
+            )
+
             with _LOCK:
                 if job_id in _BUILD_JOBS:
                     job = _BUILD_JOBS[job_id]
-                    # Update status based on result
                     final_status = result.get("status", "completed")
                     job["status"] = final_status
                     job["finished_at"] = datetime.utcnow().isoformat()
@@ -386,7 +430,7 @@ def sdlc_build(req: BuildRequest):
                     if final_status == "failed":
                         job["error"] = result.get("error")
                     save_jobs(_BUILD_JOBS)
-                
+
         except Exception as e:
             with _LOCK:
                 if job_id in _BUILD_JOBS:
@@ -395,7 +439,7 @@ def sdlc_build(req: BuildRequest):
                     job["finished_at"] = datetime.utcnow().isoformat()
                     job["error"] = str(e)
                     save_jobs(_BUILD_JOBS)
-                
+
                 try:
                     p = os.path.join(run_dir, "status.json")
                     if os.path.exists(p):
@@ -405,7 +449,11 @@ def sdlc_build(req: BuildRequest):
                 except:
                     pass
 
-    t = threading.Thread(target=_run_build, args=(job_id, run_dir, req.prompt), daemon=True)
+    t = threading.Thread(
+        target=_run_build,
+        args=(job_id, run_dir, req.prompt, supa_session_id, supa_project_id),
+        daemon=True,
+    )
     t.start()
 
     return {

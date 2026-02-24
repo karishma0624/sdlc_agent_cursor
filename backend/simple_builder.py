@@ -8,6 +8,8 @@ from datetime import datetime
 
 from services.adapters import InferenceRouter
 import services.supabase_client as supa
+from rag.retriever import retrieve_and_merge_context
+from rag.rag_service import index_phase_output
 
 class SDLCBuilder:
     """
@@ -71,21 +73,43 @@ class SDLCBuilder:
             try:
                 self._update_status(run_dir, job_id, phase, "running", f"Starting {phase} phase...")
 
+                # Retrieve RAG Context
+                rag_context = ""
+                if supabase_project_id or supabase_session_id:
+                    rag_context = retrieve_and_merge_context(
+                        query_text=f"Find context for phase: {phase}. Original prompt: {prompt}",
+                        project_id=supabase_project_id,
+                        session_id=supabase_session_id,
+                        iteration=iteration
+                    )
+
                 # Execute Phase
+                phase_output_str = ""
                 if phase == "planning":
-                    self._phase_planning(prompt, run_dir)
+                    phase_output_str = self._phase_planning(prompt, run_dir, rag_context)
                 elif phase == "design":
-                    self._phase_design(run_dir)
+                    phase_output_str = self._phase_design(run_dir, prompt, rag_context)
                 elif phase == "backend":
-                    self._phase_backend(run_dir)
+                    phase_output_str = self._phase_backend(run_dir, prompt, rag_context)
                 elif phase == "frontend":
-                    self._phase_frontend(run_dir)
+                    phase_output_str = self._phase_frontend(run_dir, prompt, rag_context)
                 elif phase == "tests":
-                    self._phase_tests(run_dir)
+                    phase_output_str = self._phase_tests(run_dir, prompt, rag_context)
                 elif phase == "deployment":
-                    self._phase_deployment(run_dir)
+                    phase_output_str = self._phase_deployment(run_dir, prompt, rag_context)
 
                 self._update_status(run_dir, job_id, phase, "completed", f"{phase} completed successfully.")
+
+                # --- RAG Index Phase Output ---
+                if (supabase_project_id or supabase_session_id) and phase_output_str:
+                    index_phase_output(
+                        project_id=supabase_project_id,
+                        session_id=supabase_session_id,
+                        phase_name=phase,
+                        content=phase_output_str,
+                        original_prompt=prompt,
+                        iteration=iteration
+                    )
 
                 # --- Supabase: log successful phase ---
                 if supabase_session_id:
@@ -163,9 +187,17 @@ class SDLCBuilder:
     # PHASES
     # ------------------------------------------------------------------
 
-    def _phase_planning(self, prompt: str, run_dir: str):
+    def _phase_planning(self, prompt: str, run_dir: str, rag_context: str = "") -> str:
         """Phase 1: Requirements"""
         sys_prompt = (
+            "You are an expert Software Architect.\n"
+            "You are continuing a deterministic SDLC workflow.\n"
+        )
+        if rag_context:
+            sys_prompt += f"\nRelevant Historical Context:\n{rag_context}\n\nFollow prior architectural decisions unless explicitly overridden.\n"
+            
+        sys_prompt += (
+            "\nAnalyze the following user request and produce a detailed requirement analysis. "
             "You are an expert Software Architect. "
             "Analyze the following user request and produce a detailed requirement analysis. "
             "Return a JSON object with: "
@@ -191,8 +223,9 @@ class SDLCBuilder:
             
         self._save_file(run_dir, "planning/requirements.md", md_content)
         self._log_usage(run_dir, "planning", res)
+        return json.dumps(data)
 
-    def _phase_design(self, run_dir: str):
+    def _phase_design(self, run_dir: str, prompt: str, rag_context: str = "") -> str:
         """Phase 2: System Design"""
         # Load planning data
         planning = self._load_json(run_dir, "planning/planning.json")
@@ -200,7 +233,14 @@ class SDLCBuilder:
             raise ValueError("Planning data missing. Cannot proceed to design.")
 
         sys_prompt = (
-            "You are a System Designer. Based on the requirements, generate a System Design. "
+            "You are a System Designer.\n"
+            "You are continuing a deterministic SDLC workflow.\n"
+        )
+        if rag_context:
+            sys_prompt += f"\nRelevant Historical Context:\n{rag_context}\n\nFollow prior decisions from the relevant context unless explicitly overridden.\n"
+            
+        sys_prompt += (
+            "Based on the requirements, generate a System Design. "
             "Return a JSON object with keys: "
             "'architecture_description', 'api_endpoints' (list of {method, path, desc}), "
             "'database_schema' (text description), "
@@ -223,13 +263,20 @@ class SDLCBuilder:
         res_mmd = self.router.generate_text(f"{mermaid_prompt}\n\nContext: {json.dumps(data)}", preference=["gemini", "openai"])
         mmd_content = self._clean_mermaid(res_mmd.get("output", ""))
         self._save_file(run_dir, "design/flowchart.mmd", mmd_content)
+        return json.dumps(data) + "\nMermaid: " + mmd_content
 
-    def _phase_backend(self, run_dir: str):
+    def _phase_backend(self, run_dir: str, original_prompt: str, rag_context: str = "") -> str:
         """Phase 3: Backend Generation"""
         design = self._load_json(run_dir, "design/design.json")
         
         prompt = (
-            "Generate a production-ready FastAPI (Python) backend using the provided design. "
+            "You are continuing a deterministic SDLC workflow.\n"
+        )
+        if rag_context:
+            prompt += f"\nRelevant Historical Context:\n{rag_context}\n\nFollow prior architectural decisions unless explicitly overridden.\n"
+            
+        prompt += (
+            "\nGenerate a production-ready FastAPI (Python) backend using the provided design. "
             "Strictly follow the project structure. "
             "Return a JSON mapping of filenames to their full string content. "
             "Include: 'main.py' (FastAPI entrypoint), 'models.py' (Pydantic/SQLAlchemy), 'database.py', 'requirements.txt'. "
@@ -246,13 +293,20 @@ class SDLCBuilder:
             
         self._write_files(run_dir, files, prefix="backend")
         self._log_usage(run_dir, "backend", res)
+        return json.dumps(list(files.keys()))
 
-    def _phase_frontend(self, run_dir: str):
+    def _phase_frontend(self, run_dir: str, original_prompt: str, rag_context: str = "") -> str:
         """Phase 4: Frontend Generation"""
         design = self._load_json(run_dir, "design/design.json")
         
         prompt = (
-            "Generate a complete React + Vite + Tailwind frontend application. "
+            "You are continuing a deterministic SDLC workflow.\n"
+        )
+        if rag_context:
+            prompt += f"\nRelevant Historical Context:\n{rag_context}\n\nFollow prior decisions from the context unless explicitly overridden.\n"
+            
+        prompt += (
+            "\nGenerate a complete React + Vite + Tailwind frontend application. "
             "Return a JSON mapping of filenames to content. "
             "Files REQUIRED: 'package.json', 'vite.config.js', 'index.html', "
             "'src/main.jsx', 'src/App.jsx', 'src/index.css', 'src/components/Layout.jsx'. "
@@ -269,14 +323,21 @@ class SDLCBuilder:
             
         self._write_files(run_dir, files, prefix="frontend")
         self._log_usage(run_dir, "frontend", res)
+        return json.dumps(list(files.keys()))
 
-    def _phase_tests(self, run_dir: str):
+    def _phase_tests(self, run_dir: str, original_prompt: str, rag_context: str = "") -> str:
         """Phase 5: Test Generation & Execution"""
         design = self._load_json(run_dir, "design/design.json")
         
         # 1. Generate Tests
         prompt = (
-            "Generate a 'test_main.py' using pytest and TestClient for the FastAPI backend. "
+            "You are continuing a deterministic SDLC workflow.\n"
+        )
+        if rag_context:
+            prompt += f"\nRelevant Historical Context:\n{rag_context}\n\nFollow prior decisions from the context unless explicitly overridden.\n"
+            
+        prompt += (
+            "\nGenerate a 'test_main.py' using pytest and TestClient for the FastAPI backend. "
             "Cover the endpoints defined in the design."
         )
         # User defined: Tests -> Groq / OpenAI
@@ -314,15 +375,21 @@ class SDLCBuilder:
         self._save_json(run_dir, "tests/test_report.json", report)
         # Also save to run root for easier access if needed, but primary is in tests/
         self._save_json(run_dir, "run_report.json", report)
+        return json.dumps(report)
 
-    def _phase_deployment(self, run_dir: str):
+    def _phase_deployment(self, run_dir: str, original_prompt: str, rag_context: str = "") -> str:
         """Phase 6: Deployment Artifacts"""
-        prompt = "Generate 'Dockerfile' for a FastAPI app and a 'docker-compose.yml' that serves backend and a generic frontend service."
+        prompt = "You are continuing a deterministic SDLC workflow.\n"
+        if rag_context:
+            prompt += f"\nRelevant Historical Context:\n{rag_context}\n\nFollow prior context strictly.\n"
+            
+        prompt += "\nGenerate 'Dockerfile' for a FastAPI app and a 'docker-compose.yml' that serves backend and a generic frontend service."
         res = self.router.generate_code(prompt, preference=["openai", "mistral"])
         files = res.get("files", {})
         self._write_files(run_dir, files, prefix="deployment")
         self._save_file(run_dir, "deployment/deployment.md", "# Deployment Guide\n\nRun `docker-compose up --build`.")
         self._log_usage(run_dir, "deployment", res)
+        return json.dumps(list(files.keys()))
 
     # ------------------------------------------------------------------
     # HELPERS

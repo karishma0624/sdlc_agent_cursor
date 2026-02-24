@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+import psycopg2
+from psycopg2 import pool
 
 # Configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here")
@@ -77,6 +79,43 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Global DB Connection Pool
+db_pool = None
+
+@app.on_event("startup")
+async def startup_event():
+    global db_pool
+    from app.config import settings
+    
+    # Parse Heroku-style postgres:// to postgresql:// if needed for SQLAlchemy, 
+    # psycopg2 accepts postgres:// directly usually, but standardizing just in case.
+    db_url = settings.DATABASE_URL
+    if db_url.startswith("sqlite"):
+        logging.warning("DATABASE_URL is SQLite, but RAG requires pgvector. Skipping pool init for local dev if mock.")
+    elif db_url:
+        try:
+            db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=db_url)
+            if db_pool:
+                logging.info("PostgreSQL connection pool created successfully.")
+                # Create performance indexes safely
+                conn = db_pool.getconn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("CREATE INDEX IF NOT EXISTS idx_rag_summaries_project_id ON rag_summaries (project_id);")
+                        cur.execute("CREATE INDEX IF NOT EXISTS idx_rag_summaries_session_id ON rag_summaries (session_id);")
+                        conn.commit()
+                finally:
+                    db_pool.putconn(conn)
+        except Exception as e:
+            logging.error(f"Error creating connection pool: {e}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global db_pool
+    if db_pool:
+        db_pool.closeall()
+        logging.info("PostgreSQL connection pool closed.")
 
 # Authentication Utilities
 def verify_password(plain_password: str, hashed_password: str) -> bool:

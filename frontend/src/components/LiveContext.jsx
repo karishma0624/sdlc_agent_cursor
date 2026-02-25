@@ -155,21 +155,33 @@ export default function LiveContext({ status, onSwitchTab }) {
                                                 <FileText className="w-3 h-3 text-slate-400" />
                                                 <span className="text-xs text-slate-300 font-medium">Planning.json</span>
                                             </div>
-                                            <div className="text-[10px] font-mono text-slate-500 truncate pl-5">
-                                                Requirements analysis completed and stored.
+                                            <div className="text-[10px] font-mono text-slate-500 truncate pl-5 mb-3">
+                                                Requirements analysis and implementation roadmap generated.
                                             </div>
+
+                                            {status.flowchart && (
+                                                <div className="mt-4 pt-4 border-t border-[#1e293b]">
+                                                    <div className="flex items-center gap-2 mb-2">
+                                                        <Map className="w-3 h-3 text-slate-400" />
+                                                        <span className="text-xs text-slate-300 font-medium">Architecture Flowchart</span>
+                                                    </div>
+                                                    <Flowchart chart={status.flowchart} />
+                                                </div>
+                                            )}
                                         </div>
                                     )
                                 }
 
                                 {
-                                    isCompleted && phase.id === 'design' && status.flowchart && (
+                                    isCompleted && phase.id === 'design' && (
                                         <div className="mx-4 mb-4 mt-2 p-3 bg-[#020617] border border-[#1e293b] rounded text-left">
-                                            <div className="flex items-center gap-2 mb-2">
+                                            <div className="flex items-center gap-2 mb-1">
                                                 <Map className="w-3 h-3 text-slate-400" />
-                                                <span className="text-xs text-slate-300 font-medium">Architecture.mmd</span>
+                                                <span className="text-xs text-slate-300 font-medium">System Design Context</span>
                                             </div>
-                                            <Flowchart chart={status.flowchart} />
+                                            <div className="text-[10px] font-mono text-slate-500 truncate pl-5">
+                                                UI Architecture and components prepared for Frontend Generation.
+                                            </div>
                                         </div>
                                     )
                                 }

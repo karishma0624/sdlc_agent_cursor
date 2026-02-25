@@ -156,6 +156,7 @@ class SDLCBuilder:
                 subprocess.run("npm install", shell=True, cwd=frontend_dir, check=True, capture_output=True)
             
             # RUN VITE on a dynamically found free port to completely avoid collisions with old projects
+            # Using npx vite to avoid NPM argument parsing bugs
             proc = subprocess.Popen(
                 f"npx vite --host 127.0.0.1 --port {free_port} --strictPort", 
                 shell=True, 
@@ -286,8 +287,8 @@ class SDLCBuilder:
              
         # --- WEB APP SDLC ---
 
-        # As requested: "for now it is enough if the previw of the frontend is done automatically" and then backend is generated.
-        phases = ["requirements", "planning", "design", "frontend"]
+        # As requested: after frontend generation the backend should be automatically done.
+        phases = ["requirements", "planning", "design", "frontend", "backend"]
         
         self._log_event(run_dir, "system", f"Build triggered: {prompt}")
         if db.enabled:

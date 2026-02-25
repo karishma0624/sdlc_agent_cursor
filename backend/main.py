@@ -546,43 +546,6 @@ def preview_endpoint(req: PreviewRequest):
     if result.get("status") == "failed":
         raise HTTPException(status_code=500, detail=result.get("error"))
         
-    # As requested by the user: "when clicked on a button called preview ... and then the backed should get generated as well"
-    with _LOCK:
-        job = _BUILD_JOBS.get(req.job_id)
-        if job:
-            run_dir = job.get("run_dir")
-            def _trigger_backend():
-                try:
-                    status = builder._load_status(run_dir)
-                    if status.get("phases", {}).get("backend", "waiting") != "completed":
-                        builder._update_status(run_dir, req.job_id, "backend", "running", "Starting backend phase...")
-                        
-                        plan_path = os.path.join(run_dir, "planning.md")
-                        if not os.path.exists(plan_path): raise ValueError("Planning missing.")
-                        with open(plan_path, "r", encoding="utf-8") as f: plan_content = f.read()
-                        
-                        from backend.phases.backend import execute_backend_phase
-                        success, msg = execute_backend_phase(plan_content, run_dir)
-                        if not success:
-                            raise RuntimeError(f"Backend Phase Failed: {msg}")
-                            
-                        builder._update_status(run_dir, req.job_id, "backend", "completed", "backend completed.")
-                        builder._update_status(run_dir, req.job_id, "complete", "completed", "All phases completed.")
-                        success_msg = f"✅ **Backend Generated Immediately After Preview!**\n\nAPI available via `uvicorn backend.main:app`."
-                        builder._log_chat_message(run_dir, "agent", success_msg)
-                        
-                        if db.enabled:
-                            try:
-                                db.update_session_status(req.job_id, "backend", "completed")
-                                db.log_execution(req.job_id, "backend", "auto", True)
-                            except: pass
-                except Exception as e:
-                    builder._update_status(run_dir, req.job_id, "backend", "failed", str(e))
-                    builder._log_chat_message(run_dir, "agent", f"❌ **Backend Phase Failed:** {str(e)}")
-            
-            t = threading.Thread(target=_trigger_backend, daemon=True)
-            t.start()
-
     return result
 
 @app.get("/runs")

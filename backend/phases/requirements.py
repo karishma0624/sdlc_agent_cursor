@@ -1,5 +1,5 @@
 import os
-from services.adapters import call_mistral
+from services.adapters import call_mistral, call_gemini_text
 
 def execute_requirements_phase(prompt: str, run_dir: str) -> str:
     """
@@ -28,17 +28,20 @@ def execute_requirements_phase(prompt: str, run_dir: str) -> str:
     
     try:
         content = call_mistral(full_prompt)
-        
         # Validation: content must be non-empty and have markdown headers
         if not content or len(content) < 100 or "# " not in content:
             raise ValueError("Mistral generated invalid/empty requirements content.")
-            
-        # Save Artifact
-        path = os.path.join(run_dir, "requirements.md")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-            
-        return content
-        
     except Exception as e:
-        raise RuntimeError(f"Requirements Phase Failed: {str(e)}")
+        print(f"Mistral failed in Requirements Phase: {e}. Falling back to Gemini...")
+        content = call_gemini_text(full_prompt, model="gemini-1.5-pro")
+        if content.startswith("Error:"):
+            raise RuntimeError(f"Requirements Phase Failed (Both APIs): {content}")
+        if not content or len(content) < 100 or "# " not in content:
+            raise RuntimeError("Requirements Phase Failed: generated invalid/empty requirements content.")
+            
+    # Save Artifact
+    path = os.path.join(run_dir, "requirements.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+        
+    return content
